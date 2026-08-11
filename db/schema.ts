@@ -1,4 +1,4 @@
-// Intentionally empty by default.
-// Add Drizzle tables here when the site actually needs a database.
-// See examples/d1/db/schema.ts for an opt-in example.
+// D1 is intentionally unused. Product persistence and authentication live in
+// the dedicated Supabase project; this module remains for the Sites starter's
+// optional D1 compatibility.
 export {};

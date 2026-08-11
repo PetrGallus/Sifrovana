@@ -1,8 +1,20 @@
 "use client";
 
 import { ChangeEvent, PointerEvent, useEffect, useRef, useState } from "react";
+import {
+  AdminCenter,
+  AuthModal,
+  CheckoutModal,
+  CityRouteMap,
+  ContactSection,
+  PartnerSection,
+  ProfileExperience,
+  type RouteSummary,
+  useSifrovanaAuth,
+} from "./product-sections";
+import { getSupabaseBrowserClient } from "../lib/supabase/client";
 
-type View = "discover" | "detail" | "library" | "game" | "finish" | "activity" | "profile";
+type View = "discover" | "detail" | "library" | "game" | "finish" | "activity" | "profile" | "admin" | "partners" | "contact";
 type Modal = "login" | "checkout" | null;
 type RouteStatus = "active" | "coming" | "seasonal";
 type PuzzleType = "online" | "physical" | "hybrid";
@@ -22,6 +34,9 @@ type RouteProduct = {
   status: RouteStatus;
   accent: string;
   available?: string;
+  xpReward: number;
+  mapX: number;
+  mapY: number;
 };
 type RouteBundle = { id: string; title: string; routeIds: string[]; price: number };
 type Puzzle = { prompt: string; answers: string[]; hints: [string, string] };
@@ -42,16 +57,13 @@ type Checkpoint = {
 type RouteProgress = { current: number; solved: string[]; hintsUsed: number; completed: boolean };
 type Activity = { id: string; title: string; date: string; distance: string; time: string; xp: number };
 type Badge = { id: string; name: string; detail: string; icon: string; earned: boolean };
-type LeaderboardEntry = { rank: number; name: string; xp: number; avatar: string; you?: boolean };
 type StoredState = {
-  loggedIn: boolean;
-  owned: boolean;
   progress: RouteProgress;
   activityAdded: boolean;
 };
 
 const cities: City[] = [
-  { id: "brno", name: "Brno", active: true, routes: 4 },
+  { id: "brno", name: "Brno", active: true, routes: 10 },
   { id: "praha", name: "Praha", active: false, routes: 0 },
   { id: "ostrava", name: "Ostrava", active: false, routes: 0 },
   { id: "olomouc", name: "Olomouc", active: false, routes: 0 },
@@ -64,13 +76,16 @@ const routes: RouteProduct[] = [
     district: "Královo Pole",
     title: "Stopy proměny",
     tagline: "Od koňky po tovární komíny. Poskládej ztracenou kroniku čtvrti.",
-    price: 249,
+    price: 250,
     distance: 4.1,
     duration: "90–120 min",
     difficulty: "Střední",
     checkpoints: 5,
     status: "active",
     accent: "orange",
+    xpReward: 520,
+    mapX: 47,
+    mapY: 18,
   },
   {
     id: "brno-stred-pod-povrchem",
@@ -78,14 +93,17 @@ const routes: RouteProduct[] = [
     district: "Brno-střed",
     title: "Pod povrchem",
     tagline: "Legendy, průchody a příběhy, které centrum schovává pod dlažbou.",
-    price: 249,
+    price: 250,
     distance: 3.6,
     duration: "80–100 min",
     difficulty: "Lehká",
-    checkpoints: 6,
+    checkpoints: 0,
     status: "coming",
     accent: "teal",
     available: "říjen 2026",
+    xpReward: 360,
+    mapX: 51,
+    mapY: 50,
   },
   {
     id: "brno-zabovresky-vily",
@@ -93,29 +111,143 @@ const routes: RouteProduct[] = [
     district: "Žabovřesky",
     title: "Vily vyprávějí",
     tagline: "Architektura, zahrady a osudy lidí za zdmi známé čtvrti.",
-    price: 229,
+    price: 250,
     distance: 4.8,
     duration: "100–130 min",
     difficulty: "Střední",
-    checkpoints: 5,
+    checkpoints: 0,
     status: "coming",
     accent: "blue",
     available: "listopad 2026",
+    xpReward: 570,
+    mapX: 35,
+    mapY: 39,
   },
   {
-    id: "brno-adventni-sifra",
+    id: "brno-veveri-za-oponou",
     cityId: "brno",
-    district: "Brno-střed",
-    title: "Adventní šifra",
-    tagline: "Světla, vůně a zapomenuté vánoční zvyky v srdci Brna.",
-    price: 199,
-    distance: 2.9,
-    duration: "60–80 min",
-    difficulty: "Lehká",
-    checkpoints: 5,
-    status: "seasonal",
+    district: "Veveří",
+    title: "Za oponou",
+    tagline: "Divadla, dvorky a studentské legendy ve čtvrti, která nikdy nespí.",
+    price: 250,
+    distance: 5.2,
+    duration: "110–130 min",
+    difficulty: "Střední",
+    checkpoints: 0,
+    status: "coming",
     accent: "red",
-    available: "28. 11. – 23. 12.",
+    available: "zima 2026",
+    xpReward: 610,
+    mapX: 48,
+    mapY: 37,
+  },
+  {
+    id: "brno-cerna-pole-moderni",
+    cityId: "brno",
+    district: "Černá Pole",
+    title: "Moderní stopy",
+    tagline: "Funkcionalismus, zahrady a stopy nové brněnské elegance.",
+    price: 250,
+    distance: 4.4,
+    duration: "95–115 min",
+    difficulty: "Střední",
+    checkpoints: 0,
+    status: "coming",
+    accent: "teal",
+    available: "jaro 2027",
+    xpReward: 540,
+    mapX: 61,
+    mapY: 31,
+  },
+  {
+    id: "brno-lisen-stara",
+    cityId: "brno",
+    district: "Líšeň",
+    title: "Příběh staré Líšně",
+    tagline: "Od staré vsi k okraji Moravského krasu skrze zaniklé příběhy.",
+    price: 250,
+    distance: 6.1,
+    duration: "125–145 min",
+    difficulty: "Těžká",
+    checkpoints: 0,
+    status: "coming",
+    accent: "orange",
+    available: "jaro 2027",
+    xpReward: 790,
+    mapX: 83,
+    mapY: 53,
+  },
+  {
+    id: "brno-bystrc-prygl",
+    cityId: "brno",
+    district: "Bystrc · Prygl",
+    title: "Tajemství Pryglu",
+    tagline: "Přehrada, lodě a stopy ukryté mezi vodou, skálami a hradem Veveří.",
+    price: 250,
+    distance: 7.5,
+    duration: "150–180 min",
+    difficulty: "Těžká",
+    checkpoints: 0,
+    status: "coming",
+    accent: "blue",
+    available: "léto 2027",
+    xpReward: 930,
+    mapX: 10,
+    mapY: 47,
+  },
+  {
+    id: "brno-komin-reka",
+    cityId: "brno",
+    district: "Komín",
+    title: "Mezi řekou a skálou",
+    tagline: "Objev starý Komín podél Svratky a výhledů na západní Brno.",
+    price: 250,
+    distance: 5.6,
+    duration: "115–135 min",
+    difficulty: "Střední",
+    checkpoints: 0,
+    status: "coming",
+    accent: "teal",
+    available: "léto 2027",
+    xpReward: 650,
+    mapX: 24,
+    mapY: 43,
+  },
+  {
+    id: "brno-zidenice-stara-dama",
+    cityId: "brno",
+    district: "Židenice",
+    title: "Stará dáma",
+    tagline: "Dělnické kolonie, nádraží a proměna východní brány města.",
+    price: 250,
+    distance: 4.9,
+    duration: "105–125 min",
+    difficulty: "Střední",
+    checkpoints: 0,
+    status: "coming",
+    accent: "red",
+    available: "podzim 2027",
+    xpReward: 590,
+    mapX: 72,
+    mapY: 50,
+  },
+  {
+    id: "brno-husovice-delnik",
+    cityId: "brno",
+    district: "Husovice",
+    title: "Po stopách dělnického Brna",
+    tagline: "Řeka, továrny a příběhy lidí, kteří stavěli moderní Brno.",
+    price: 250,
+    distance: 4.2,
+    duration: "90–110 min",
+    difficulty: "Lehká",
+    checkpoints: 0,
+    status: "coming",
+    accent: "orange",
+    available: "podzim 2027",
+    xpReward: 400,
+    mapX: 64,
+    mapY: 37,
   },
 ];
 
@@ -123,8 +255,26 @@ const bundle: RouteBundle = {
   id: "brno-trio",
   title: "Brněnská trilogie",
   routeIds: routes.slice(0, 3).map((route) => route.id),
-  price: 599,
+  price: 500,
 };
+
+const routeSummaries: RouteSummary[] = routes.map((route) => ({
+  id: route.id,
+  district: route.district,
+  title: route.title,
+  tagline: route.tagline,
+  price: route.price,
+  distance: route.distance,
+  duration: route.duration,
+  difficulty: route.difficulty,
+  checkpoints: route.checkpoints,
+  status: route.status,
+  accent: route.accent,
+  available: route.available,
+  xpReward: route.xpReward,
+  mapX: route.mapX,
+  mapY: route.mapY,
+}));
 
 const checkpoints: Checkpoint[] = [
   {
@@ -234,16 +384,7 @@ const badges: Badge[] = [
   { id: "season", name: "Lovec sezón", detail: "Dokonči časově omezenou trasu", icon: "✦", earned: false },
 ];
 
-const leaderboard: LeaderboardEntry[] = [
-  { rank: 1, name: "Matěj K.", xp: 2840, avatar: "MK" },
-  { rank: 2, name: "Tereza P.", xp: 2610, avatar: "TP" },
-  { rank: 3, name: "David N.", xp: 2380, avatar: "DN" },
-  { rank: 18, name: "Klára Novotná", xp: 1340, avatar: "KN", you: true },
-];
-
 const initialState: StoredState = {
-  loggedIn: false,
-  owned: false,
   progress: { current: 0, solved: [], hintsUsed: 0, completed: false },
   activityAdded: false,
 };
@@ -255,6 +396,7 @@ function normalizeAnswer(value: string) {
 }
 
 export default function Home() {
+  const auth = useSifrovanaAuth();
   const [view, setView] = useState<View>("discover");
   const [modal, setModal] = useState<Modal>(null);
   const [state, setState] = useState<StoredState>(initialState);
@@ -266,20 +408,26 @@ export default function Home() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [photo, setPhoto] = useState<string | null>(null);
   const [proofMode, setProofMode] = useState<"photo" | "signature" | "skip">("photo");
-  const [checkoutItem, setCheckoutItem] = useState<"route" | "bundle">("route");
+  const [checkoutItem, setCheckoutItem] = useState<"route" | "bundle" | "full">("route");
+  const [selectedRoute, setSelectedRoute] = useState<RouteSummary>(routeSummaries[0]);
+  const [resumeCheckout, setResumeCheckout] = useState(false);
+  const [ownedRouteIds, setOwnedRouteIds] = useState<string[]>([]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(storageKey);
-    if (saved) {
-      try {
-        setState(JSON.parse(saved) as StoredState);
-      } catch {
-        window.localStorage.removeItem(storageKey);
+    const timer = window.setTimeout(() => {
+      const saved = window.localStorage.getItem(storageKey);
+      if (saved) {
+        try {
+          setState(JSON.parse(saved) as StoredState);
+        } catch {
+          window.localStorage.removeItem(storageKey);
+        }
       }
-    }
-    setHydrated(true);
+      setHydrated(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   useEffect(() => {
@@ -287,18 +435,37 @@ export default function Home() {
   }, [state, hydrated]);
 
   useEffect(() => {
-    setArrived(false);
-    setAnswer("");
-    setAnswerStatus("idle");
-    setShownHints(0);
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !auth.user) {
+      const timer = window.setTimeout(() => setOwnedRouteIds([]), 0);
+      return () => window.clearTimeout(timer);
+    }
+    let active = true;
+    supabase.from("user_route_access").select("route_id").eq("user_id", auth.user.id).then(({ data }) => {
+      if (active) setOwnedRouteIds((data ?? []).map((item) => item.route_id as string));
+    });
+    return () => { active = false; };
+  }, [auth.user]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setArrived(false);
+      setAnswer("");
+      setAnswerStatus("idle");
+      setShownHints(0);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [state.progress.current]);
 
   const activeCheckpoint = checkpoints[Math.min(state.progress.current, checkpoints.length - 1)];
   const completed = state.progress.completed;
+  const ownsPilotRoute = auth.profile?.role === "superadmin" || ownedRouteIds.includes(routes[0].id);
   const earnedBadges = badges.map((badge) => (badge.id === "king" && completed ? { ...badge, earned: true } : badge));
   const activities = state.activityAdded
     ? [{ id: "pilot", title: "Královo Pole: Stopy proměny", date: "Dnes", distance: "4,1 km", time: "1:34", xp: 520 }, ...baseActivities]
     : baseActivities;
+  const accountName = auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Přihlásit";
+  const accountInitials = accountName.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
 
   function navigate(next: View) {
     setView(next);
@@ -306,25 +473,25 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function openPurchase(item: "route" | "bundle" = "route") {
+  function openPurchase(item: "route" | "bundle" | "full" = "route", route: RouteSummary = routeSummaries[0]) {
     setCheckoutItem(item);
-    if (!state.loggedIn) setModal("login");
+    setSelectedRoute(route);
+    setResumeCheckout(true);
+    if (!auth.user) setModal("login");
     else setModal("checkout");
   }
 
   function login() {
-    setState((current) => ({ ...current, loggedIn: true }));
-    setModal("checkout");
+    setModal(resumeCheckout ? "checkout" : null);
+    if (!resumeCheckout) navigate("profile");
   }
 
   function buy() {
-    setState((current) => ({ ...current, loggedIn: true, owned: true }));
-    setModal(null);
-    navigate("library");
+    void auth.refreshProfile();
   }
 
   function startGame() {
-    if (!state.owned) {
+    if (!ownsPilotRoute) {
       openPurchase("route");
       return;
     }
@@ -417,13 +584,6 @@ export default function Home() {
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
   }
 
-  function resetDemo() {
-    window.localStorage.removeItem(storageKey);
-    setState(initialState);
-    setPhoto(null);
-    navigate("discover");
-  }
-
   if (!hydrated) return <div className="loading-shell"><span className="loader-mark">Š</span><p>Rozkládáme mapu…</p></div>;
 
   return (
@@ -438,10 +598,11 @@ export default function Home() {
           <NavButton active={view === "library" || view === "game" || view === "finish"} onClick={() => navigate("library")}>Moje hry</NavButton>
           <NavButton active={view === "activity"} onClick={() => navigate("activity")}>Aktivita</NavButton>
           <NavButton active={view === "profile"} onClick={() => navigate("profile")}>Profil</NavButton>
+          {(auth.profile?.role === "route_manager" || auth.profile?.role === "superadmin") && <NavButton active={view === "admin"} onClick={() => navigate("admin")}>Správa</NavButton>}
         </nav>
-        <button className="account-chip" onClick={() => state.loggedIn ? navigate("profile") : setModal("login")}>
-          <span>{state.loggedIn ? "KN" : "?"}</span>
-          <b>{state.loggedIn ? "Klára" : "Přihlásit"}</b>
+        <button className="account-chip" onClick={() => { if (auth.user) navigate("profile"); else { setResumeCheckout(false); setModal("login"); } }}>
+          <span>{auth.user ? accountInitials : "?"}</span>
+          <b>{auth.user ? accountName : "Přihlásit"}</b>
         </button>
         <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Otevřít menu" aria-expanded={menuOpen}>☰</button>
       </header>
@@ -452,13 +613,16 @@ export default function Home() {
           <button onClick={() => navigate("library")}>Moje hry</button>
           <button onClick={() => navigate("activity")}>Aktivita</button>
           <button onClick={() => navigate("profile")}>Profil</button>
+          {(auth.profile?.role === "route_manager" || auth.profile?.role === "superadmin") && <button onClick={() => navigate("admin")}>Správa</button>}
+          <button onClick={() => navigate("partners")}>Pro partnery</button>
+          <button onClick={() => navigate("contact")}>Kontakt</button>
         </div>
       )}
 
       <main>
         {view === "discover" && <Discover onDetail={() => navigate("detail")} onBuy={openPurchase} />}
-        {view === "detail" && <RouteDetail owned={state.owned} onBack={() => navigate("discover")} onBuy={() => openPurchase("route")} onStart={startGame} />}
-        {view === "library" && <Library owned={state.owned} progress={state.progress} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={() => navigate("detail")} />}
+        {view === "detail" && <RouteDetail owned={ownsPilotRoute} onBack={() => navigate("discover")} onBuy={() => openPurchase("route")} onStart={startGame} />}
+        {view === "library" && <Library owned={ownsPilotRoute} progress={state.progress} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={() => navigate("detail")} />}
         {view === "game" && (
           <Game
             checkpoint={activeCheckpoint}
@@ -492,8 +656,13 @@ export default function Home() {
           />
         )}
         {view === "activity" && <ActivityView activities={activities} />}
-        {view === "profile" && <Profile completed={completed} activities={activities} badges={earnedBadges} onReset={resetDemo} />}
+        {view === "profile" && <ProfileExperience auth={auth} completed={completed} activities={activities} badges={earnedBadges} onLogin={() => { setResumeCheckout(false); setModal("login"); }} />}
+        {view === "admin" && <AdminCenter auth={auth} />}
+        {view === "partners" && <PartnerSection />}
+        {view === "contact" && <ContactSection auth={auth} />}
       </main>
+
+      <footer className="site-footer"><div className="section-wrap"><div><span className="brand-name">Šifrovaná<span className="brand-dot">.</span></span><small>Město není kulisa. Je to šifra.</small></div><nav><button onClick={() => navigate("partners")}>Pro podniky a provozovatele</button><button onClick={() => navigate("contact")}>Nahlásit chybu nebo nápad</button></nav></div></footer>
 
       <nav className="bottom-nav" aria-label="Mobilní navigace">
         <BottomButton icon="⌖" label="Objevuj" active={view === "discover" || view === "detail"} onClick={() => navigate("discover")} />
@@ -502,7 +671,8 @@ export default function Home() {
         <BottomButton icon="◉" label="Profil" active={view === "profile"} onClick={() => navigate("profile")} />
       </nav>
 
-      {modal && <ModalLayer modal={modal} item={checkoutItem} onClose={() => setModal(null)} onLogin={login} onBuy={buy} />}
+      {modal === "login" && <AuthModal auth={auth} onClose={() => setModal(null)} onAuthenticated={login} />}
+      {modal === "checkout" && <CheckoutModal auth={auth} kind={checkoutItem} route={selectedRoute} routes={routeSummaries} onClose={() => { setModal(null); setResumeCheckout(false); }} onCreated={buy} />}
     </div>
   );
 }
@@ -515,7 +685,7 @@ function BottomButton({ icon, label, active, onClick }: { icon: string; label: s
   return <button className={active ? "active" : ""} onClick={onClick}><span>{icon}</span><b>{label}</b></button>;
 }
 
-function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "route" | "bundle") => void }) {
+function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "route" | "bundle" | "full", route?: RouteSummary) => void }) {
   return (
     <>
       <section className="hero">
@@ -550,14 +720,16 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
       <section className="city-bar section-wrap">
         <div><span className="section-label">Vyber město</span><h2>Kde budeš pátrat?</h2></div>
         <div className="city-pills">
-          {cities.map((city) => <button key={city.id} className={city.active ? "active" : ""} disabled={!city.active}><span>{city.name}</span><small>{city.active ? `${city.routes} trasy` : "brzy"}</small></button>)}
+          {cities.map((city) => <button key={city.id} className={city.active ? "active" : ""} disabled={!city.active}><span>{city.name}</span><small>{city.active ? `${city.routes} ${city.routes === 1 ? "trasa" : city.routes < 5 ? "trasy" : "tras"}` : "brzy"}</small></button>)}
         </div>
       </section>
+
+      <CityRouteMap routes={routeSummaries} onBuy={(route) => onBuy("route", route)} />
 
       <section className="routes-section section-wrap">
         <div className="section-heading">
           <div><span className="section-label">Brno · aktuálně</span><h2>Vyber si svou výpravu</h2></div>
-          <span className="route-count">04 / trasy</span>
+          <span className="route-count">10 / tras</span>
         </div>
         <div className="route-grid">
           {routes.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={onDetail} />)}
@@ -568,7 +740,14 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
         <div className="bundle-stamp"><span>3×</span><small>VÍCE STOP<br />MÉNĚ KORUN</small></div>
         <div className="bundle-copy"><span className="section-label light">Výhodný balíček</span><h2>{bundle.title}</h2><p>Tři městské části, tři různé příběhy a jedno celé Brno k prozkoumání.</p></div>
         <div className="bundle-routes"><span>Královo Pole</span><span>Brno-střed</span><span>Žabovřesky</span></div>
-        <div className="bundle-buy"><small>Ušetříš 128 Kč</small><strong>{bundle.price} Kč</strong><button className="button cream" onClick={() => onBuy("bundle")}>Chci celý balíček →</button></div>
+        <div className="bundle-buy"><small>Ušetříš 250 Kč</small><strong>{bundle.price} Kč</strong><button className="button cream" onClick={() => onBuy("bundle")}>Chci balíček 3 tras →</button></div>
+      </section>
+
+      <section className="bundle full-city-bundle section-wrap">
+        <div className="bundle-stamp"><span>½</span><small>CENA ZA<br />KAŽDOU TRASU</small></div>
+        <div className="bundle-copy"><span className="section-label light">Kompletní město</span><h2>Celé Brno</h2><p>Všech {routes.length} současných i připravovaných tras. Při přidání dalších tras se cena balíčku průběžně přepočítá.</p></div>
+        <div className="bundle-routes"><span>{routes.length} tras</span><span>125 Kč / trasa</span><span>jednorázově</span></div>
+        <div className="bundle-buy"><small>Běžně {routes.length * 250} Kč</small><strong>{routes.length * 125} Kč</strong><button className="button cream" onClick={() => onBuy("full")}>Chci celé Brno →</button></div>
       </section>
 
       <section className="how section-wrap" id="jak-to-funguje">
@@ -589,7 +768,7 @@ function RouteCard({ route, index, onDetail }: { route: RouteProduct; index: num
   return (
     <article className={`route-card ${route.accent} ${!active ? "muted" : ""}`}>
       <div className="route-visual">
-        <span className="route-number">0{index}</span>
+        <span className="route-number">{String(index).padStart(2, "0")}</span>
         {route.status === "seasonal" && <span className="season-tag">✦ ČASOVĚ OMEZENO</span>}
         {route.status === "coming" && <span className="coming-tag">PŘIPRAVUJEME · {route.available}</span>}
         <div className="mini-streets"><i /><i /><i /><i /></div>
@@ -729,36 +908,5 @@ function ActivityView({ activities }: { activities: Activity[] }) {
       <div className="activity-summary"><div><small>Srpen</small><b>16,2 km</b><span>↗ 12 % oproti červenci</span></div><div className="bar-chart">{[35, 62, 46, 80, 52, 95, 70].map((h, i) => <i key={i} style={{ height: `${h}%` }} />)}</div></div>
       <div className="activity-list"><h2>Poslední výpravy</h2>{activities.map((activity) => <article key={activity.id}><span className="activity-icon">↗</span><div><b>{activity.title}</b><small>{activity.date}</small></div><div className="activity-numbers"><span>{activity.distance}</span><span>{activity.time}</span><strong>+{activity.xp} XP</strong></div></article>)}</div>
     </section>
-  );
-}
-
-function Profile({ completed, activities, badges: profileBadges, onReset }: { completed: boolean; activities: Activity[]; badges: Badge[]; onReset: () => void }) {
-  const xp = completed ? 1860 : 1340;
-  return (
-    <section className="profile-page">
-      <div className="profile-hero"><div className="section-wrap profile-head"><div className="profile-avatar">KN<span>7</span></div><div><span className="eyebrow light"><span /> MĚSTSKÝ STOPAŘ</span><h1>Klára Novotná</h1><p>Brno · členka od června 2026</p></div><div className="level-card"><span>LEVEL 7</span><div><i style={{ width: `${completed ? 72 : 46}%` }} /></div><small>{xp} / 2 000 XP do další úrovně</small></div></div></div>
-      <div className="section-wrap profile-content">
-        <div className="stat-strip"><div><small>Celkem kilometrů</small><b>{completed ? "46,7" : "42,6"}<i> km</i></b></div><div><small>Kroků ve hrách</small><b>{completed ? "64 272" : "58 430"}</b></div><div><small>Dokončené trasy</small><b>{completed ? "8" : "7"}</b></div><div><small>Aktuální série</small><b>3<i> týdny</i></b></div></div>
-        <div className="profile-grid">
-          <div className="profile-main">
-            <section className="panel badges-panel"><div className="panel-heading"><div><span className="section-label">Sbírka</span><h2>Odznaky</h2></div><span>{profileBadges.filter((badge) => badge.earned).length} / {profileBadges.length}</span></div><div className="badges-grid">{profileBadges.map((badge) => <article key={badge.id} className={badge.earned ? "earned" : "locked"}><span>{badge.icon}</span><b>{badge.name}</b><small>{badge.detail}</small></article>)}</div></section>
-            <section className="panel recent-panel"><div className="panel-heading"><div><span className="section-label">Deník</span><h2>Poslední výpravy</h2></div></div>{activities.slice(0, 3).map((activity) => <article key={activity.id}><span>↗</span><div><b>{activity.title}</b><small>{activity.date} · {activity.distance}</small></div><strong>+{activity.xp} XP</strong></article>)}</section>
-          </div>
-          <aside className="panel leaderboard"><div className="panel-heading"><div><span className="section-label">Tento týden</span><h2>Brno žebříček</h2></div></div><div className="podium"><div><span>2</span><b>TP</b><small>2 610</small></div><div><span>1</span><b>MK</b><small>2 840</small></div><div><span>3</span><b>DN</b><small>2 380</small></div></div><div className="rank-list">{leaderboard.map((entry) => <div key={entry.rank} className={entry.you ? "you" : ""}><span>{entry.rank}.</span><i>{entry.avatar}</i><b>{entry.name}{entry.you && <small> TY</small>}</b><strong>{entry.you && completed ? entry.xp + 520 : entry.xp} XP</strong></div>)}</div></aside>
-        </div>
-        <button className="reset-button" onClick={onReset}>Resetovat demo data</button>
-      </div>
-    </section>
-  );
-}
-
-function ModalLayer({ modal, item, onClose, onLogin, onBuy }: { modal: Exclude<Modal, null>; item: "route" | "bundle"; onClose: () => void; onLogin: () => void; onBuy: () => void }) {
-  const price = item === "route" ? 249 : 599;
-  return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" onClick={onClose} aria-label="Zavřít">×</button>
-        {modal === "login" ? <><span className="modal-symbol">Š</span><span className="section-label">Demo účet</span><h2 id="modal-title">Nejdřív si tě zapíšeme do kroniky</h2><p>V pilotu nic neověřujeme. Jedním kliknutím vstoupíš jako Klára a postup zůstane jen v tomto prohlížeči.</p><label>E-mail<input value="klara@sifrovana.cz" readOnly /></label><button className="button primary full" onClick={onLogin}>Vstoupit jako Klára →</button><small className="modal-note">Bez hesla · bez odesílání dat · pouze demo</small></> : <><span className="section-label">Rekapitulace</span><h2 id="modal-title">Ještě jeden krok a vyrážíš</h2><div className="checkout-item"><span>01</span><div><small>{item === "route" ? "TRASA" : "BALÍČEK"}</small><b>{item === "route" ? "Královo Pole: Stopy proměny" : "Brněnská trilogie"}</b><p>{item === "route" ? "4,1 km · 5 checkpointů" : "3 městské části · 3 trasy"}</p></div><strong>{price} Kč</strong></div><div className="demo-payment"><span>DEMO</span><p>Toto je simulace nákupu. Platební karta ani skutečná platba nejsou potřeba.</p></div><div className="checkout-total"><span>Celkem</span><strong>{price} Kč</strong></div><button className="button primary full" onClick={onBuy}>Potvrdit demo nákup →</button><small className="modal-note">Potvrzením nevzniká žádná platba ani závazek.</small></>}
-      </div>
-    </div>
   );
 }

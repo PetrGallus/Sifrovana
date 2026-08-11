@@ -1,4 +1,29 @@
-# vinext-starter
+# Šifrovaná
+
+Mobilní městská šifrovací hra pro objevování Brna pěšky. Frontend běží na OpenAI Sites, autentizace a produktová data v Supabase.
+
+## Produktová vrstva
+
+- přihlášení e-mailem a heslem přes Supabase Auth;
+- připravené OAuth akce pro Google a Apple (vyžadují provider credentials v Supabase);
+- role `user`, `route_manager` a `superadmin` chráněné pomocí RLS;
+- 10 úrovní, XP historie a odemykané profilové odznaky;
+- 10 brněnských tras včetně Bystrce/Pryglu;
+- balíčky 1 trasa / 3 trasy / celé město;
+- QR objednávky schvalované superadminem;
+- editovatelné e-mailové šablony, partnerské leady a kontaktní zprávy.
+
+## Prostředí
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+NEXT_PUBLIC_PAYMENT_IBAN=
+```
+
+`NEXT_PUBLIC_PAYMENT_IBAN` je veřejný cílový účet ve formátu IBAN. Dokud není nastavený, objednávky fungují, ale aplikace záměrně nevytvoří neplatný platební QR kód.
+
+## Vývoj
 
 A clean full-stack starter running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
