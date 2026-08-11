@@ -10,6 +10,7 @@ export type UserRole = "user" | "route_manager" | "superadmin";
 export type AppProfile = {
   id: string;
   email: string;
+  username: string | null;
   display_name: string | null;
   avatar_url: string | null;
   home_city: string | null;
@@ -120,8 +121,8 @@ export function useSifrovanaAuth(): AuthController {
 
 type AuthMode = "signin" | "signup" | "reset" | "update";
 
-export function AuthModal({ auth, onClose, onAuthenticated }: { auth: AuthController; onClose: () => void; onAuthenticated: () => void }) {
-  const [mode, setMode] = useState<AuthMode>(auth.recoveryMode ? "update" : "signin");
+export function AuthModal({ auth, initialMode = "signin", onClose, onAuthenticated }: { auth: AuthController; initialMode?: "signin" | "signup"; onClose: () => void; onAuthenticated: () => void }) {
+  const [mode, setMode] = useState<AuthMode>(auth.recoveryMode ? "update" : initialMode);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -296,20 +297,21 @@ export function CityRouteMap({ routes, onBuy }: { routes: RouteSummary[]; onBuy:
   );
 }
 
-export function ProfileExperience({ auth, completed, activities, badges, onLogin }: {
+export function ProfileExperience({ auth, completed, activities, badges, onLogin, onRegister }: {
   auth: AuthController;
   completed: boolean;
   activities: Array<{ id: string; title: string; date: string; distance: string; time: string; xp: number }>;
   badges: Array<{ id: string; name: string; detail: string; icon: string; earned: boolean }>;
   onLogin: () => void;
+  onRegister: () => void;
 }) {
   const xp = (auth.profile?.xp ?? 0) + (completed ? 520 : 0);
   const level = currentLevel(xp);
   const next = LEVELS[level.level] ?? level;
   const progress = level.level === 10 ? 100 : Math.max(0, Math.min(100, ((xp - level.minXp) / (next.minXp - level.minXp)) * 100));
-  const name = auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Městský hráč";
+  const name = auth.profile?.username || auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Městský hráč";
 
-  if (!auth.loading && !auth.user) return <section className="page section-wrap signed-out-profile"><span className="section-label">Profil hráče</span><h1>Tvoje město. Tvůj příběh.</h1><p>Přihlas se a ukládej XP, úrovně, zakoupené trasy i dokončené výpravy napříč zařízeními.</p><button className="button primary" onClick={onLogin}>Přihlásit nebo vytvořit účet →</button></section>;
+  if (!auth.loading && !auth.user) return <section className="page section-wrap signed-out-profile"><span className="section-label">Profil hráče</span><h1>Tvoje město. Tvůj příběh.</h1><p>Vytvoř si účet a ukládej XP, úrovně, zakoupené trasy i dokončené výpravy napříč zařízeními.</p><div className="profile-auth-actions"><button className="button primary" onClick={onRegister}>Vytvořit účet →</button><button className="text-button" onClick={onLogin}>Už mám účet</button></div></section>;
 
   return (
     <section className="profile-page">

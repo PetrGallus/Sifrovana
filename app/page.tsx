@@ -399,6 +399,7 @@ export default function Home() {
   const auth = useSifrovanaAuth();
   const [view, setView] = useState<View>("discover");
   const [modal, setModal] = useState<Modal>(null);
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [state, setState] = useState<StoredState>(initialState);
   const [hydrated, setHydrated] = useState(false);
   const [arrived, setArrived] = useState(false);
@@ -464,7 +465,7 @@ export default function Home() {
   const activities = state.activityAdded
     ? [{ id: "pilot", title: "Královo Pole: Stopy proměny", date: "Dnes", distance: "4,1 km", time: "1:34", xp: 520 }, ...baseActivities]
     : baseActivities;
-  const accountName = auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Přihlásit";
+  const accountName = auth.profile?.username || auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Přihlásit";
   const accountInitials = accountName.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
 
   function navigate(next: View) {
@@ -477,8 +478,10 @@ export default function Home() {
     setCheckoutItem(item);
     setSelectedRoute(route);
     setResumeCheckout(true);
-    if (!auth.user) setModal("login");
-    else setModal("checkout");
+    if (!auth.user) {
+      setAuthMode("signin");
+      setModal("login");
+    } else setModal("checkout");
   }
 
   function login() {
@@ -600,7 +603,7 @@ export default function Home() {
           <NavButton active={view === "profile"} onClick={() => navigate("profile")}>Profil</NavButton>
           {(auth.profile?.role === "route_manager" || auth.profile?.role === "superadmin") && <NavButton active={view === "admin"} onClick={() => navigate("admin")}>Správa</NavButton>}
         </nav>
-        <button className="account-chip" onClick={() => { if (auth.user) navigate("profile"); else { setResumeCheckout(false); setModal("login"); } }}>
+        <button className="account-chip" onClick={() => { if (auth.user) navigate("profile"); else { setResumeCheckout(false); setAuthMode("signin"); setModal("login"); } }}>
           <span>{auth.user ? accountInitials : "?"}</span>
           <b>{auth.user ? accountName : "Přihlásit"}</b>
         </button>
@@ -656,7 +659,7 @@ export default function Home() {
           />
         )}
         {view === "activity" && <ActivityView activities={activities} />}
-        {view === "profile" && <ProfileExperience auth={auth} completed={completed} activities={activities} badges={earnedBadges} onLogin={() => { setResumeCheckout(false); setModal("login"); }} />}
+        {view === "profile" && <ProfileExperience auth={auth} completed={completed} activities={activities} badges={earnedBadges} onLogin={() => { setResumeCheckout(false); setAuthMode("signin"); setModal("login"); }} onRegister={() => { setResumeCheckout(false); setAuthMode("signup"); setModal("login"); }} />}
         {view === "admin" && <AdminCenter auth={auth} />}
         {view === "partners" && <PartnerSection />}
         {view === "contact" && <ContactSection auth={auth} />}
@@ -671,7 +674,7 @@ export default function Home() {
         <BottomButton icon="◉" label="Profil" active={view === "profile"} onClick={() => navigate("profile")} />
       </nav>
 
-      {modal === "login" && <AuthModal auth={auth} onClose={() => setModal(null)} onAuthenticated={login} />}
+      {modal === "login" && <AuthModal auth={auth} initialMode={authMode} onClose={() => setModal(null)} onAuthenticated={login} />}
       {modal === "checkout" && <CheckoutModal auth={auth} kind={checkoutItem} route={selectedRoute} routes={routeSummaries} onClose={() => { setModal(null); setResumeCheckout(false); }} onCreated={buy} />}
     </div>
   );
