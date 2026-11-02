@@ -27,31 +27,46 @@ test("server-renders the branded Šifrovaná pilot", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
 
-test("contains the complete local-first game model", async () => {
-  const [page, layout, css, packageJson] = await Promise.all([
+test("contains the versioned local-first route model", async () => {
+  const [page, routeContent, layout, css, packageJson] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/route-content.ts", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
   ]);
 
-  assert.match(page, /type City =/);
-  assert.match(page, /type RouteProduct =/);
-  assert.match(page, /type Checkpoint =/);
   assert.match(page, /type RouteProgress =/);
   assert.match(page, /const storageKey = "sifrovana-demo-v1"/);
   assert.match(page, /Město není kulisa/);
   assert.match(page, /Stopy proměny/);
   assert.match(page, /Jak se hraje Šifrovaná/);
-  assert.match(page, /const checkpoints: Checkpoint\[\] = \[/);
+  assert.match(routeContent, /export type City =/);
+  assert.match(routeContent, /export type RouteProduct =/);
+  assert.match(routeContent, /export type Checkpoint =/);
+  assert.match(routeContent, /export type RouteLifecycle =/);
+  assert.match(routeContent, /version: string/);
+  assert.match(routeContent, /audience: RouteAudience\[\]/);
+  assert.match(routeContent, /language: "cs"/);
+  assert.match(routeContent, /accessibilityNote: string/);
+  assert.match(routeContent, /safetyNote: string/);
+  assert.match(routeContent, /lastFieldCheck: string \| null/);
+  assert.match(routeContent, /fallback: \{ prompt: string; answers: string\[\] \}/);
+  assert.match(routeContent, /sourceRefs: SourceRef\[\]/);
+  assert.match(routeContent, /export const checkpoints: Checkpoint\[\] = \[/);
   for (const id of ["semilasso", "radnice", "slovanske-namesti", "kartouza", "strojirna"]) {
-    assert.match(page, new RegExp(`id: "${id}"`));
+    assert.match(routeContent, new RegExp(`id: "${id}"`));
   }
-  assert.match(page, /"1876"/);
-  assert.match(page, /"domovu"/);
-  assert.match(page, /"svoboda"/);
-  assert.match(page, /"1375"/);
-  assert.match(page, /"1890"/);
+  assert.match(routeContent, /"1876"/);
+  assert.match(routeContent, /"domovu"/);
+  assert.match(routeContent, /"svoboda"/);
+  assert.match(routeContent, /"1375"/);
+  assert.match(routeContent, /"1890"/);
+  assert.match(routeContent, /price: 449/);
+  assert.match(routeContent, /price: 999/);
+  assert.doesNotMatch(routeContent, /xpReward/);
+  assert.doesNotMatch(page, /1 284 průzkumníků|10 \/ tras/);
+  assert.match(page, /Místo nejde přečíst\? Použít záložní otázku/);
   assert.match(layout, /images: \[\{ url: "\/og\.png"/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);

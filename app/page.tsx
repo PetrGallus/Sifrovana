@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- Selfie uses a local object URL and is never uploaded. */
+
 import { ChangeEvent, PointerEvent, useEffect, useRef, useState } from "react";
 import {
   AdminCenter,
@@ -13,250 +15,28 @@ import {
   useSifrovanaAuth,
 } from "./product-sections";
 import { getSupabaseBrowserClient } from "../lib/supabase/client";
+import {
+  bundle,
+  cities,
+  getRouteCheckpoints,
+  pilotRouteId,
+  routes,
+  type Checkpoint,
+  type RouteProduct,
+} from "../lib/route-content";
 
 type View = "discover" | "detail" | "library" | "game" | "finish" | "activity" | "profile" | "admin" | "partners" | "contact";
 type Modal = "login" | "checkout" | null;
-type RouteStatus = "active" | "coming" | "seasonal";
-type PuzzleType = "online" | "physical" | "hybrid";
-
-type City = { id: string; name: string; active: boolean; routes: number };
-type RouteProduct = {
-  id: string;
-  cityId: string;
-  district: string;
-  title: string;
-  tagline: string;
-  price: number;
-  distance: number;
-  duration: string;
-  difficulty: string;
-  checkpoints: number;
-  status: RouteStatus;
-  accent: string;
-  available?: string;
-  xpReward: number;
-  mapX: number;
-  mapY: number;
-};
-type RouteBundle = { id: string; title: string; routeIds: string[]; price: number };
-type Puzzle = { prompt: string; answers: string[]; hints: [string, string] };
-type Checkpoint = {
-  id: string;
-  order: number;
-  title: string;
-  short: string;
-  coordinates: { lat: number; lng: number };
-  type: PuzzleType;
-  distanceFromPrevious: string;
-  story: string;
-  puzzle: Puzzle;
-  fact: string;
-  nextClue: string;
-  map: { x: number; y: number };
-};
 type RouteProgress = { current: number; solved: string[]; hintsUsed: number; completed: boolean };
-type Activity = { id: string; title: string; date: string; distance: string; time: string; xp: number };
+type Activity = { id: string; title: string; date: string; distance: string; time: string };
 type Badge = { id: string; name: string; detail: string; icon: string; earned: boolean };
 type StoredState = {
   progress: RouteProgress;
   activityAdded: boolean;
 };
 
-const cities: City[] = [
-  { id: "brno", name: "Brno", active: true, routes: 10 },
-  { id: "praha", name: "Praha", active: false, routes: 0 },
-  { id: "ostrava", name: "Ostrava", active: false, routes: 0 },
-  { id: "olomouc", name: "Olomouc", active: false, routes: 0 },
-];
-
-const routes: RouteProduct[] = [
-  {
-    id: "brno-kralovo-pole-stopy",
-    cityId: "brno",
-    district: "Královo Pole",
-    title: "Stopy proměny",
-    tagline: "Od koňky po tovární komíny. Poskládej ztracenou kroniku čtvrti.",
-    price: 250,
-    distance: 4.1,
-    duration: "90–120 min",
-    difficulty: "Střední",
-    checkpoints: 5,
-    status: "active",
-    accent: "orange",
-    xpReward: 520,
-    mapX: 47,
-    mapY: 18,
-  },
-  {
-    id: "brno-stred-pod-povrchem",
-    cityId: "brno",
-    district: "Brno-střed",
-    title: "Pod povrchem",
-    tagline: "Legendy, průchody a příběhy, které centrum schovává pod dlažbou.",
-    price: 250,
-    distance: 3.6,
-    duration: "80–100 min",
-    difficulty: "Lehká",
-    checkpoints: 0,
-    status: "coming",
-    accent: "teal",
-    available: "říjen 2026",
-    xpReward: 360,
-    mapX: 51,
-    mapY: 50,
-  },
-  {
-    id: "brno-zabovresky-vily",
-    cityId: "brno",
-    district: "Žabovřesky",
-    title: "Vily vyprávějí",
-    tagline: "Architektura, zahrady a osudy lidí za zdmi známé čtvrti.",
-    price: 250,
-    distance: 4.8,
-    duration: "100–130 min",
-    difficulty: "Střední",
-    checkpoints: 0,
-    status: "coming",
-    accent: "blue",
-    available: "listopad 2026",
-    xpReward: 570,
-    mapX: 35,
-    mapY: 39,
-  },
-  {
-    id: "brno-veveri-za-oponou",
-    cityId: "brno",
-    district: "Veveří",
-    title: "Za oponou",
-    tagline: "Divadla, dvorky a studentské legendy ve čtvrti, která nikdy nespí.",
-    price: 250,
-    distance: 5.2,
-    duration: "110–130 min",
-    difficulty: "Střední",
-    checkpoints: 0,
-    status: "coming",
-    accent: "red",
-    available: "zima 2026",
-    xpReward: 610,
-    mapX: 48,
-    mapY: 37,
-  },
-  {
-    id: "brno-cerna-pole-moderni",
-    cityId: "brno",
-    district: "Černá Pole",
-    title: "Moderní stopy",
-    tagline: "Funkcionalismus, zahrady a stopy nové brněnské elegance.",
-    price: 250,
-    distance: 4.4,
-    duration: "95–115 min",
-    difficulty: "Střední",
-    checkpoints: 0,
-    status: "coming",
-    accent: "teal",
-    available: "jaro 2027",
-    xpReward: 540,
-    mapX: 61,
-    mapY: 31,
-  },
-  {
-    id: "brno-lisen-stara",
-    cityId: "brno",
-    district: "Líšeň",
-    title: "Příběh staré Líšně",
-    tagline: "Od staré vsi k okraji Moravského krasu skrze zaniklé příběhy.",
-    price: 250,
-    distance: 6.1,
-    duration: "125–145 min",
-    difficulty: "Těžká",
-    checkpoints: 0,
-    status: "coming",
-    accent: "orange",
-    available: "jaro 2027",
-    xpReward: 790,
-    mapX: 83,
-    mapY: 53,
-  },
-  {
-    id: "brno-bystrc-prygl",
-    cityId: "brno",
-    district: "Bystrc · Prygl",
-    title: "Tajemství Pryglu",
-    tagline: "Přehrada, lodě a stopy ukryté mezi vodou, skálami a hradem Veveří.",
-    price: 250,
-    distance: 7.5,
-    duration: "150–180 min",
-    difficulty: "Těžká",
-    checkpoints: 0,
-    status: "coming",
-    accent: "blue",
-    available: "léto 2027",
-    xpReward: 930,
-    mapX: 10,
-    mapY: 47,
-  },
-  {
-    id: "brno-komin-reka",
-    cityId: "brno",
-    district: "Komín",
-    title: "Mezi řekou a skálou",
-    tagline: "Objev starý Komín podél Svratky a výhledů na západní Brno.",
-    price: 250,
-    distance: 5.6,
-    duration: "115–135 min",
-    difficulty: "Střední",
-    checkpoints: 0,
-    status: "coming",
-    accent: "teal",
-    available: "léto 2027",
-    xpReward: 650,
-    mapX: 24,
-    mapY: 43,
-  },
-  {
-    id: "brno-zidenice-stara-dama",
-    cityId: "brno",
-    district: "Židenice",
-    title: "Stará dáma",
-    tagline: "Dělnické kolonie, nádraží a proměna východní brány města.",
-    price: 250,
-    distance: 4.9,
-    duration: "105–125 min",
-    difficulty: "Střední",
-    checkpoints: 0,
-    status: "coming",
-    accent: "red",
-    available: "podzim 2027",
-    xpReward: 590,
-    mapX: 72,
-    mapY: 50,
-  },
-  {
-    id: "brno-husovice-delnik",
-    cityId: "brno",
-    district: "Husovice",
-    title: "Po stopách dělnického Brna",
-    tagline: "Řeka, továrny a příběhy lidí, kteří stavěli moderní Brno.",
-    price: 250,
-    distance: 4.2,
-    duration: "90–110 min",
-    difficulty: "Lehká",
-    checkpoints: 0,
-    status: "coming",
-    accent: "orange",
-    available: "podzim 2027",
-    xpReward: 400,
-    mapX: 64,
-    mapY: 37,
-  },
-];
-
-const bundle: RouteBundle = {
-  id: "brno-trio",
-  title: "Brněnská trilogie",
-  routeIds: routes.slice(0, 3).map((route) => route.id),
-  price: 500,
-};
+const demoRoute = routes.find((route) => route.id === pilotRouteId) ?? routes[0];
+const checkpoints = getRouteCheckpoints(demoRoute.id);
 
 const routeSummaries: RouteSummary[] = routes.map((route) => ({
   id: route.id,
@@ -271,117 +51,16 @@ const routeSummaries: RouteSummary[] = routes.map((route) => ({
   status: route.status,
   accent: route.accent,
   available: route.available,
-  xpReward: route.xpReward,
   mapX: route.mapX,
   mapY: route.mapY,
 }));
 
-const checkpoints: Checkpoint[] = [
-  {
-    id: "semilasso",
-    order: 1,
-    title: "Semilasso",
-    short: "Kulturní dům",
-    coordinates: { lat: 49.22688, lng: 16.59488 },
-    type: "online",
-    distanceFromPrevious: "Start",
-    story: "První list kroniky se ztratil v rachotu kol. Právě tudy kdysi vedla cesta, která Královo Pole přiblížila Brnu.",
-    puzzle: {
-      prompt: "Seřaď dvojice 18–76, 19–00 a 20–26 podle dopravního vývoje. Který rok patří první slavnostní jízdě koňky do Králova Pole?",
-      answers: ["1876", "1 8 7 6"],
-      hints: ["Koňka přijela ještě před elektrickou tramvají.", "Spoj první dvojici století s druhou dvojicí roku: 18 + 76."],
-    },
-    fact: "Slavnostní jízda druhé brněnské koněspřežné tramvaje do Králova Pole proběhla 4. června 1876.",
-    nextClue: "Najdi místo, kde se zrcadlí dva nárožní domy a nad podloubím bdí práce i úspory.",
-    map: { x: 14, y: 78 },
-  },
-  {
-    id: "radnice",
-    order: 2,
-    title: "Královopolská radnice",
-    short: "Palackého třída",
-    coordinates: { lat: 49.22423, lng: 16.59651 },
-    type: "physical",
-    distanceFromPrevious: "0,5 km",
-    story: "Nové město chtělo novou tvář. Architekt Jindřich Kumpošt ji ve dvacátých letech vepsal do dvou zrcadlových nároží.",
-    puzzle: {
-      prompt: "Na fasádě se ukrývá věta „Úsporami k vlastnímu …“. Doplň poslední slovo.",
-      answers: ["domovu", "domov"],
-      hints: ["Hledej reliéf na budově Palackého třída 59.", "Je to místo, kam se člověk vrací a kde bydlí."],
-    },
-    fact: "Budova dnešní radnice byla dokončena roku 1925. Spolu s protějším domem vytvořila nové velkoměstské centrum čtvrti.",
-    nextClue: "Pokračuj na náměstí, které tvoří zelený ovál. Hledej strom vysazený těsně před vznikem republiky.",
-    map: { x: 32, y: 63 },
-  },
-  {
-    id: "slovanske-namesti",
-    order: 3,
-    title: "Lípa svobody",
-    short: "Slovanské náměstí",
-    coordinates: { lat: 49.22948, lng: 16.59083 },
-    type: "hybrid",
-    distanceFromPrevious: "1,0 km",
-    story: "Třetí list kroniky chrání strom, který byl zasazen v čase, kdy válka ještě neskončila, ale svoboda už byla cítit ve vzduchu.",
-    puzzle: {
-      prompt: "Rozlušti posun o tři písmena zpět: VYŘERGD. Piš bez diakritiky.",
-      answers: ["svoboda"],
-      hints: ["Jde o Caesarovu šifru. Každé písmeno posuň v abecedě o tři místa zpět.", "V → S, Y → V, Ř ber jako O. Výsledek začíná „SVO…“."],
-    },
-    fact: "Husova lípa, později zvaná také Lípa svobody, byla na dnešním Slovanském náměstí slavnostně vysazena 6. října 1918.",
-    nextClue: "Čtvrtý list čeká u místa ticha a studia. Z klášterních cel se dnes ozývají klávesnice.",
-    map: { x: 52, y: 46 },
-  },
-  {
-    id: "kartouza",
-    order: 4,
-    title: "Bývalá kartouza",
-    short: "FIT VUT",
-    coordinates: { lat: 49.22625, lng: 16.59819 },
-    type: "online",
-    distanceFromPrevious: "0,8 km",
-    story: "Za zdmi kartuziánského kláštera se po staletí střídalo rozjímání, kasárna i technické vzdělávání. Kronika tu mluví v římských číslicích.",
-    puzzle: {
-      prompt: "Převeď M·CCC·LXX·V na rok založení královopolské kartouzy.",
-      answers: ["1375", "1 375"],
-      hints: ["M = 1000, CCC = 300, LXX = 70 a V = 5.", "Sečti 1000 + 300 + 70 + 5."],
-    },
-    fact: "Kartuziánský klášter založil moravský markrabě Jan Jindřich roku 1375. Dnes areál využívá Fakulta informačních technologií VUT.",
-    nextClue: "Poslední stopu zanechaly stroje. Vydej se tam, kde na konci 19. století začala růst průmyslová čtvrť.",
-    map: { x: 70, y: 31 },
-  },
-  {
-    id: "strojirna",
-    order: 5,
-    title: "Průmyslová stopa",
-    short: "Královopolská strojírna",
-    coordinates: { lat: 49.23782, lng: 16.60822 },
-    type: "hybrid",
-    distanceFromPrevious: "1,8 km",
-    story: "Továrna přitáhla dělníky, úředníky i obchody. Z vesnického okolí se stalo sebevědomé město. Zbývá doplnit poslední rok.",
-    puzzle: {
-      prompt: "Vezmi rok povýšení na město 1905 a odečti 15 let. Výsledek je rok založení strojírny.",
-      answers: ["1890", "1 890"],
-      hints: ["Počítej 1905 − 10 − 5.", "1905 − 15 = 1890."],
-    },
-    fact: "Královopolská strojírna byla založena roku 1890 a zásadně urychlila proměnu i růst celé čtvrti.",
-    nextClue: "Kronika je kompletní. Seřadil/a jsi pět stop proměny Králova Pole.",
-    map: { x: 88, y: 14 },
-  },
-];
-
-const baseActivities: Activity[] = [
-  { id: "a1", title: "Veveří: Za oponou", date: "2. srpna", distance: "5,2 km", time: "1:42", xp: 420 },
-  { id: "a2", title: "Lužánky: Zelené stopy", date: "24. července", distance: "3,8 km", time: "1:08", xp: 310 },
-  { id: "a3", title: "Brněnské vyhlídky", date: "11. července", distance: "7,1 km", time: "2:14", xp: 580 },
-];
+const baseActivities: Activity[] = [];
 
 const badges: Badge[] = [
-  { id: "king", name: "Král KrPole", detail: "Dokonči trasu Stopy proměny", icon: "♛", earned: false },
-  { id: "first", name: "První stopa", detail: "Dokončena první městská hra", icon: "◇", earned: true },
-  { id: "walker", name: "Městský chodec", detail: "Ujdi ve hrách 25 kilometrů", icon: "↗", earned: true },
-  { id: "cipher", name: "Šifrant", detail: "Vyřeš 20 šifer bez druhé nápovědy", icon: "#", earned: true },
-  { id: "early", name: "Ranní ptáče", detail: "Vyraz na trasu před osmou", icon: "☼", earned: false },
-  { id: "season", name: "Lovec sezón", detail: "Dokonči časově omezenou trasu", icon: "✦", earned: false },
+  { id: "king", name: "Král KrPole", detail: "Stopy proměny · Královo Pole", icon: "♛", earned: false },
+  { id: "center", name: "Brno-střed", detail: "Pod povrchem · připravujeme", icon: "◇", earned: false },
+  { id: "zabovresky", name: "Žabovřesky", detail: "Vily vyprávějí · připravujeme", icon: "⌂", earned: false },
 ];
 
 const initialState: StoredState = {
@@ -406,10 +85,11 @@ export default function Home() {
   const [answer, setAnswer] = useState("");
   const [answerStatus, setAnswerStatus] = useState<"idle" | "wrong" | "correct">("idle");
   const [shownHints, setShownHints] = useState(0);
+  const [fallbackMode, setFallbackMode] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [photo, setPhoto] = useState<string | null>(null);
   const [proofMode, setProofMode] = useState<"photo" | "signature" | "skip">("photo");
-  const [checkoutItem, setCheckoutItem] = useState<"route" | "bundle" | "full">("route");
+  const [checkoutItem, setCheckoutItem] = useState<"route" | "bundle">("route");
   const [selectedRoute, setSelectedRoute] = useState<RouteSummary>(routeSummaries[0]);
   const [resumeCheckout, setResumeCheckout] = useState(false);
   const [ownedRouteIds, setOwnedRouteIds] = useState<string[]>([]);
@@ -448,22 +128,12 @@ export default function Home() {
     return () => { active = false; };
   }, [auth.user]);
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setArrived(false);
-      setAnswer("");
-      setAnswerStatus("idle");
-      setShownHints(0);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [state.progress.current]);
-
   const activeCheckpoint = checkpoints[Math.min(state.progress.current, checkpoints.length - 1)];
   const completed = state.progress.completed;
-  const ownsPilotRoute = auth.profile?.role === "superadmin" || ownedRouteIds.includes(routes[0].id);
+  const ownsPilotRoute = auth.profile?.role === "superadmin" || ownedRouteIds.includes(demoRoute.id);
   const earnedBadges = badges.map((badge) => (badge.id === "king" && completed ? { ...badge, earned: true } : badge));
   const activities = state.activityAdded
-    ? [{ id: "pilot", title: "Královo Pole: Stopy proměny", date: "Dnes", distance: "4,1 km", time: "1:34", xp: 520 }, ...baseActivities]
+    ? [{ id: "pilot", title: "Královo Pole: Stopy proměny", date: "Dnes", distance: "4,1 km", time: "1:34" }, ...baseActivities]
     : baseActivities;
   const accountName = auth.profile?.username || auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Přihlásit";
   const accountInitials = accountName.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
@@ -474,7 +144,9 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function openPurchase(item: "route" | "bundle" | "full" = "route", route: RouteSummary = routeSummaries[0]) {
+  function openPurchase(item: "route" | "bundle" = "route", route: RouteSummary = routeSummaries[0]) {
+    const bundleReady = bundle.routeIds.every((routeId) => routes.find((candidate) => candidate.id === routeId)?.status === "active");
+    if ((item === "route" && route.status !== "active") || (item === "bundle" && !bundleReady)) return;
     setCheckoutItem(item);
     setSelectedRoute(route);
     setResumeCheckout(true);
@@ -494,6 +166,7 @@ export default function Home() {
   }
 
   function startGame() {
+    resetCheckpointUi();
     if (!ownsPilotRoute) {
       openPurchase("route");
       return;
@@ -502,6 +175,14 @@ export default function Home() {
       setState((current) => ({ ...current, progress: initialState.progress, activityAdded: current.activityAdded }));
     }
     navigate("game");
+  }
+
+  function resetCheckpointUi() {
+    setArrived(false);
+    setAnswer("");
+    setAnswerStatus("idle");
+    setShownHints(0);
+    setFallbackMode(false);
   }
 
   function revealHint() {
@@ -515,8 +196,16 @@ export default function Home() {
 
   function checkAnswer() {
     const normalized = normalizeAnswer(answer);
-    const valid = activeCheckpoint.puzzle.answers.some((item) => normalizeAnswer(item) === normalized);
+    const acceptedAnswers = fallbackMode ? activeCheckpoint.fallback.answers : activeCheckpoint.puzzle.answers;
+    const valid = acceptedAnswers.some((item) => normalizeAnswer(item) === normalized);
     setAnswerStatus(valid ? "correct" : "wrong");
+  }
+
+  function toggleFallback() {
+    setFallbackMode((current) => !current);
+    setAnswer("");
+    setAnswerStatus("idle");
+    setShownHints(0);
   }
 
   function nextCheckpoint() {
@@ -533,6 +222,7 @@ export default function Home() {
       ...current,
       progress: { ...current.progress, current: current.progress.current + 1, solved },
     }));
+    resetCheckpointUi();
   }
 
   function finishRoute() {
@@ -637,7 +327,9 @@ export default function Home() {
             answerStatus={answerStatus}
             setAnswerStatus={setAnswerStatus}
             shownHints={shownHints}
+            fallbackMode={fallbackMode}
             onHint={revealHint}
+            onToggleFallback={toggleFallback}
             onCheck={checkAnswer}
             onNext={nextCheckpoint}
             onExit={() => navigate("library")}
@@ -688,7 +380,14 @@ function BottomButton({ icon, label, active, onClick }: { icon: string; label: s
   return <button className={active ? "active" : ""} onClick={onClick}><span>{icon}</span><b>{label}</b></button>;
 }
 
-function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "route" | "bundle" | "full", route?: RouteSummary) => void }) {
+function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "route" | "bundle", route?: RouteSummary) => void }) {
+  const bundleListPrice = bundle.routeIds.reduce(
+    (total, routeId) => total + (routes.find((route) => route.id === routeId)?.price ?? 0),
+    0,
+  );
+  const bundleSavings = bundleListPrice - bundle.price;
+  const bundleReady = bundle.routeIds.every((routeId) => routes.find((route) => route.id === routeId)?.status === "active");
+
   return (
     <>
       <section className="hero">
@@ -701,8 +400,8 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
             <button className="text-button" onClick={() => document.getElementById("jak-to-funguje")?.scrollIntoView({ behavior: "smooth" })}>Jak to funguje <span>↓</span></button>
           </div>
           <div className="hero-proof">
-            <div className="avatar-stack"><span>MK</span><span>TP</span><span>DN</span></div>
-            <div><b>1 284 průzkumníků</b><small>už vyrazilo do ulic</small></div>
+            <div className="avatar-stack"><span>01</span><span>BR</span><span>KP</span></div>
+            <div><b>Pilotní výprava v Králově Poli</b><small>první trasa připravená k ověření</small></div>
           </div>
         </div>
         <div className="hero-map" aria-label="Stylizovaná mapa Králova Pole">
@@ -723,7 +422,7 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
       <section className="city-bar section-wrap">
         <div><span className="section-label">Vyber město</span><h2>Kde budeš pátrat?</h2></div>
         <div className="city-pills">
-          {cities.map((city) => <button key={city.id} className={city.active ? "active" : ""} disabled={!city.active}><span>{city.name}</span><small>{city.active ? `${city.routes} ${city.routes === 1 ? "trasa" : city.routes < 5 ? "trasy" : "tras"}` : "brzy"}</small></button>)}
+          {cities.map((city) => <button key={city.id} className={city.active ? "active" : ""} disabled={!city.active}><span>{city.name}</span><small>{city.active ? `${routes.filter((route) => route.cityId === city.id && route.status === "active").length} aktivní · ${routes.filter((route) => route.cityId === city.id && route.status === "coming").length} připravujeme` : "později"}</small></button>)}
         </div>
       </section>
 
@@ -732,7 +431,7 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
       <section className="routes-section section-wrap">
         <div className="section-heading">
           <div><span className="section-label">Brno · aktuálně</span><h2>Vyber si svou výpravu</h2></div>
-          <span className="route-count">10 / tras</span>
+          <span className="route-count">1 aktivní · 2 připravujeme</span>
         </div>
         <div className="route-grid">
           {routes.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={onDetail} />)}
@@ -741,16 +440,9 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
 
       <section className="bundle section-wrap">
         <div className="bundle-stamp"><span>3×</span><small>VÍCE STOP<br />MÉNĚ KORUN</small></div>
-        <div className="bundle-copy"><span className="section-label light">Výhodný balíček</span><h2>{bundle.title}</h2><p>Tři městské části, tři různé příběhy a jedno celé Brno k prozkoumání.</p></div>
+        <div className="bundle-copy"><span className="section-label light">{bundleReady ? "Výhodný balíček" : "Připravujeme"}</span><h2>{bundle.title}</h2><p>{bundleReady ? "Tři městské části, tři různé příběhy a jedno celé Brno k prozkoumání." : "Balíček zpřístupníme, až budou všechny tři trasy hotové a ověřené v terénu."}</p></div>
         <div className="bundle-routes"><span>Královo Pole</span><span>Brno-střed</span><span>Žabovřesky</span></div>
-        <div className="bundle-buy"><small>Ušetříš 250 Kč</small><strong>{bundle.price} Kč</strong><button className="button cream" onClick={() => onBuy("bundle")}>Chci balíček 3 tras →</button></div>
-      </section>
-
-      <section className="bundle full-city-bundle section-wrap">
-        <div className="bundle-stamp"><span>½</span><small>CENA ZA<br />KAŽDOU TRASU</small></div>
-        <div className="bundle-copy"><span className="section-label light">Kompletní město</span><h2>Celé Brno</h2><p>Všech {routes.length} současných i připravovaných tras. Při přidání dalších tras se cena balíčku průběžně přepočítá.</p></div>
-        <div className="bundle-routes"><span>{routes.length} tras</span><span>125 Kč / trasa</span><span>jednorázově</span></div>
-        <div className="bundle-buy"><small>Běžně {routes.length * 250} Kč</small><strong>{routes.length * 125} Kč</strong><button className="button cream" onClick={() => onBuy("full")}>Chci celé Brno →</button></div>
+        <div className="bundle-buy"><small>{bundleReady ? `Ušetříš ${bundleSavings} Kč` : "Cena po vydání"}</small><strong>{bundle.price} Kč</strong><button className="button cream" onClick={() => onBuy("bundle")} disabled={!bundleReady}>{bundleReady ? "Chci balíček 3 tras →" : "Dostupné po vydání 3 tras"}</button></div>
       </section>
 
       <section className="how section-wrap" id="jak-to-funguje">
@@ -759,7 +451,7 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
           <article><span className="step-no">01</span><div className="step-icon">⌖</div><h3>Vyber trasu</h3><p>Podle města, délky, času a obtížnosti. Každá čtvrť ukrývá jiný příběh.</p></article>
           <article><span className="step-no">02</span><div className="step-icon">↗</div><h3>Vyraz do ulic</h3><p>Mapa tě dovede k první stopě. Další místo se odhalí až po rozluštění.</p></article>
           <article><span className="step-no">03</span><div className="step-icon">#</div><h3>Lušti a objevuj</h3><p>Hledej detaily, lámej šifry a odemykej skutečné příběhy míst kolem tebe.</p></article>
-          <article><span className="step-no">04</span><div className="step-icon">♛</div><h3>Sbírej odznaky</h3><p>Zapisuj kilometry, buduj sérii a staň se nejlepším městským stopařem.</p></article>
+          <article><span className="step-no">04</span><div className="step-icon">♛</div><h3>Ulož si výpravu</h3><p>Na konci získáš památeční odznak a přehled míst, která jsi objevil/a.</p></article>
         </div>
       </section>
     </>
@@ -810,7 +502,7 @@ function RouteDetail({ owned, onBack, onBuy, onStart }: { owned: boolean; onBack
           <div className="checkpoint-preview">{checkpoints.map((cp, index) => <div key={cp.id}><span>{index === 0 ? "⌖" : "?"}</span><div><b>{index === 0 ? cp.title : `Stopa ${index + 1} je skrytá`}</b><small>{index === 0 ? "Start výpravy" : "Odemkne se během hry"}</small></div></div>)}</div>
         </div>
         <aside className="purchase-card">
-          <div className="purchase-top"><span>TRASA PRO 1–5 HRÁČŮ</span><strong>{owned ? "Zakoupeno" : "249 Kč"}</strong><small>Jednorázově · bez předplatného</small></div>
+          <div className="purchase-top"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{owned ? "Zakoupeno" : `${demoRoute.price} Kč`}</strong><small>Jednorázově · bez předplatného</small></div>
           <button className="button primary full" onClick={owned ? onStart : onBuy}>{owned ? "Vyrazit na trasu →" : "Koupit trasu →"}</button>
           <ul><li>✓ Hraješ vlastním tempem</li><li>✓ 2 úrovně nápovědy</li><li>✓ Přístup bez časového omezení</li><li>✓ Odznak Král KrPole</li></ul>
           <div className="gear"><b>Co s sebou?</b><p>Nabitý telefon, pohodlné boty, tužku a chuť dívat se kolem sebe.</p></div>
@@ -840,8 +532,8 @@ function Library({ owned, progress, onDiscover, onStart, onDetail }: { owned: bo
   );
 }
 
-function Game({ checkpoint, progress, arrived, setArrived, answer, setAnswer, answerStatus, setAnswerStatus, shownHints, onHint, onCheck, onNext, onExit }: {
-  checkpoint: Checkpoint; progress: RouteProgress; arrived: boolean; setArrived: (value: boolean) => void; answer: string; setAnswer: (value: string) => void; answerStatus: "idle" | "wrong" | "correct"; setAnswerStatus: (value: "idle" | "wrong" | "correct") => void; shownHints: number; onHint: () => void; onCheck: () => void; onNext: () => void; onExit: () => void;
+function Game({ checkpoint, progress, arrived, setArrived, answer, setAnswer, answerStatus, setAnswerStatus, shownHints, fallbackMode, onHint, onToggleFallback, onCheck, onNext, onExit }: {
+  checkpoint: Checkpoint; progress: RouteProgress; arrived: boolean; setArrived: (value: boolean) => void; answer: string; setAnswer: (value: string) => void; answerStatus: "idle" | "wrong" | "correct"; setAnswerStatus: (value: "idle" | "wrong" | "correct") => void; shownHints: number; fallbackMode: boolean; onHint: () => void; onToggleFallback: () => void; onCheck: () => void; onNext: () => void; onExit: () => void;
 }) {
   return (
     <section className="game-page">
@@ -857,7 +549,7 @@ function Game({ checkpoint, progress, arrived, setArrived, answer, setAnswer, an
             })}
             <div className="map-location"><i /> Tvoje poloha <small>demo</small></div>
           </div>
-          <div className="map-meta"><span><small>K dalšímu bodu</small><b>{checkpoint.distanceFromPrevious}</b></span><span><small>Nasbírané XP</small><b>{(checkpoint.order - 1) * 100 + Math.max(0, 50 - progress.hintsUsed * 10)}</b></span><span><small>GPS</small><b className="ready">Připraveno</b></span></div>
+          <div className="map-meta"><span><small>K dalšímu bodu</small><b>{checkpoint.distanceFromPrevious}</b></span><span><small>Vyřešené stopy</small><b>{Math.min(progress.solved.length + (answerStatus === "correct" ? 1 : 0), checkpoints.length)} / {checkpoints.length}</b></span><span><small>GPS</small><b className="ready">Připraveno</b></span></div>
         </div>
         <div className="puzzle-panel">
           <div className="checkpoint-title"><span className="checkpoint-badge">STOPA {String(checkpoint.order).padStart(2, "0")}</span><small>{checkpoint.type === "online" ? "ONLINE ŠIFRA" : checkpoint.type === "physical" ? "FYZICKÁ STOPA" : "HYBRIDNÍ STOPA"}</small><h1>{checkpoint.title}</h1><p>{checkpoint.short} · {checkpoint.coordinates.lat.toFixed(4)}, {checkpoint.coordinates.lng.toFixed(4)}</p></div>
@@ -866,13 +558,14 @@ function Game({ checkpoint, progress, arrived, setArrived, answer, setAnswer, an
           ) : (
             <>
               <div className="story-card"><span>LIST Z KRONIKY</span><p>{checkpoint.story}</p></div>
-              <div className="cipher-card"><div className="cipher-title"><span>#</span><div><small>ŠIFRA {checkpoint.order}/5</small><h2>Rozlušti stopu</h2></div></div><p>{checkpoint.puzzle.prompt}</p>
+              <div className="cipher-card"><div className="cipher-title"><span>{fallbackMode ? "↺" : "#"}</span><div><small>{fallbackMode ? "ZÁLOŽNÍ ZADÁNÍ" : `ŠIFRA ${checkpoint.order}/5`}</small><h2>{fallbackMode ? "Pokračuj bez překážky" : "Rozlušti stopu"}</h2></div></div><p>{fallbackMode ? checkpoint.fallback.prompt : checkpoint.puzzle.prompt}</p>
+                <button className="fallback-button" type="button" onClick={onToggleFallback}>{fallbackMode ? "← Zpět k původní šifře" : "Místo nejde přečíst? Použít záložní otázku"}</button>
                 <label htmlFor="answer">Tvoje odpověď</label><div className={`answer-row ${answerStatus}`}><input id="answer" value={answer} onChange={(event) => { setAnswer(event.target.value); setAnswerStatus("idle"); }} onKeyDown={(event) => event.key === "Enter" && onCheck()} placeholder="Napiš řešení…" autoComplete="off" /><button onClick={onCheck} disabled={!answer.trim()}>Ověřit</button></div>
-                {answerStatus === "wrong" && <div className="answer-note wrong">To zatím nesedí. Rozhlédni se znovu nebo použij nápovědu.</div>}
-                {shownHints > 0 && <div className="hint"><b>Nápověda {shownHints}</b><p>{checkpoint.puzzle.hints[shownHints - 1]}</p></div>}
-                {answerStatus !== "correct" && <button className="hint-button" onClick={onHint} disabled={shownHints >= 2}>◎ {shownHints >= 2 ? "Všechny nápovědy použity" : `Chci nápovědu ${shownHints + 1}`} <small>−{shownHints === 0 ? 10 : 20} XP</small></button>}
+                {answerStatus === "wrong" && <div className="answer-note wrong">{fallbackMode ? "To zatím nesedí. Zkus odpověď zapsat jinými slovy." : "To zatím nesedí. Rozhlédni se znovu nebo použij nápovědu."}</div>}
+                {!fallbackMode && shownHints > 0 && <div className="hint"><b>Nápověda {shownHints}</b><p>{checkpoint.puzzle.hints[shownHints - 1]}</p></div>}
+                {!fallbackMode && answerStatus !== "correct" && <button className="hint-button" onClick={onHint} disabled={shownHints >= 2}>◎ {shownHints >= 2 ? "Všechny nápovědy použity" : `Chci nápovědu ${shownHints + 1}`}</button>}
               </div>
-              {answerStatus === "correct" && <div className="success-card"><span className="success-mark">✓</span><div><small>STOPA ROZLUŠTĚNA · +{Math.max(50, 100 - shownHints * 20)} XP</small><h2>{checkpoint.order === 5 ? "Kronika je kompletní!" : "Máš další list kroniky"}</h2><p>{checkpoint.fact}</p><div className="next-clue"><small>{checkpoint.order === 5 ? "ZÁVĚR" : "DALŠÍ STOPA"}</small><b>{checkpoint.nextClue}</b></div><button className="button primary full" onClick={onNext}>{checkpoint.order === 5 ? "Dokončit výpravu →" : "Odhalit další checkpoint →"}</button></div></div>}
+              {answerStatus === "correct" && <div className="success-card"><span className="success-mark">✓</span><div><small>STOPA ROZLUŠTĚNA</small><h2>{checkpoint.order === 5 ? "Kronika je kompletní!" : "Máš další list kroniky"}</h2><p>{checkpoint.fact}</p><div className="next-clue"><small>{checkpoint.order === 5 ? "ZÁVĚR" : "DALŠÍ STOPA"}</small><b>{checkpoint.nextClue}</b></div><button className="button primary full" onClick={onNext}>{checkpoint.order === 5 ? "Dokončit výpravu →" : "Odhalit další checkpoint →"}</button></div></div>}
             </>
           )}
         </div>
@@ -884,12 +577,11 @@ function Game({ checkpoint, progress, arrived, setArrived, answer, setAnswer, an
 function Finish({ hintsUsed, proofMode, setProofMode, photo, onPhoto, canvasRef, onPointerDown, onPointerMove, onPointerUp, onClear, onFinish }: {
   hintsUsed: number; proofMode: "photo" | "signature" | "skip"; setProofMode: (mode: "photo" | "signature" | "skip") => void; photo: string | null; onPhoto: (event: ChangeEvent<HTMLInputElement>) => void; canvasRef: React.RefObject<HTMLCanvasElement | null>; onPointerDown: (event: PointerEvent<HTMLCanvasElement>) => void; onPointerMove: (event: PointerEvent<HTMLCanvasElement>) => void; onPointerUp: () => void; onClear: () => void; onFinish: () => void;
 }) {
-  const score = Math.max(300, 520 - hintsUsed * 15);
   return (
     <section className="finish-page">
       <div className="confetti"><i /><i /><i /><i /><i /><i /></div>
       <div className="finish-intro"><span className="finish-crown">♛</span><span className="eyebrow light"><span /> VÝPRAVA DOKONČENA</span><h1>Královo Pole<br /><em>už před tebou nic neskryje.</em></h1><p>Pět stop, čtyři kilometry a jedna zachráněná kronika. Dobrá práce, Kláro.</p></div>
-      <div className="finish-stats"><div><small>Čas</small><b>1:34:12</b></div><div><small>Vzdálenost</small><b>4,1 km</b></div><div><small>Kroky</small><b>5 842</b></div><div><small>Skóre</small><b>{score} XP</b></div></div>
+      <div className="finish-stats"><div><small>Čas</small><b>1:34:12</b></div><div><small>Vzdálenost</small><b>4,1 km</b></div><div><small>Stopy</small><b>{checkpoints.length} / {checkpoints.length}</b></div><div><small>Nápovědy</small><b>{hintsUsed}</b></div></div>
       <div className="badge-award"><div className="big-badge"><span>♛</span><i>KRÁL<br />KRPOLE</i></div><div><span className="section-label">Nový odznak</span><h2>Král KrPole</h2><p>Za kompletní rozluštění pěti stop proměny Králova Pole.</p></div></div>
       <div className="proof-card">
         <div className="proof-heading"><div><span className="section-label">Zanech stopu</span><h2>Jak si výpravu zapamatuješ?</h2></div><p>Volitelné · zůstává jen v tomto zařízení</p></div>
@@ -905,11 +597,13 @@ function Finish({ hintsUsed, proofMode, setProofMode, photo, onPhoto, canvasRef,
 }
 
 function ActivityView({ activities }: { activities: Activity[] }) {
+  const hasActivities = activities.length > 0;
+
   return (
     <section className="page section-wrap activity-page">
       <div className="page-heading"><span className="section-label">Tvůj pohyb městem</span><h1>Aktivita</h1><p>Každý krok má příběh. Tady jsou ty tvoje.</p></div>
-      <div className="activity-summary"><div><small>Srpen</small><b>16,2 km</b><span>↗ 12 % oproti červenci</span></div><div className="bar-chart">{[35, 62, 46, 80, 52, 95, 70].map((h, i) => <i key={i} style={{ height: `${h}%` }} />)}</div></div>
-      <div className="activity-list"><h2>Poslední výpravy</h2>{activities.map((activity) => <article key={activity.id}><span className="activity-icon">↗</span><div><b>{activity.title}</b><small>{activity.date}</small></div><div className="activity-numbers"><span>{activity.distance}</span><span>{activity.time}</span><strong>+{activity.xp} XP</strong></div></article>)}</div>
+      <div className="activity-summary"><div><small>Dokončené výpravy</small><b>{hasActivities ? "4,1 km" : "0 km"}</b><span>{hasActivities ? "První čtvrť je v městském pasu" : "První příběh na tebe teprve čeká"}</span></div><div className={`bar-chart ${hasActivities ? "" : "empty"}`}>{hasActivities ? [28, 46, 35, 64, 52, 88, 70].map((h, i) => <i key={i} style={{ height: `${h}%` }} />) : <p>Po dokončení trasy tu uvidíš svůj přehled.</p>}</div></div>
+      <div className="activity-list"><h2>Poslední výpravy</h2>{hasActivities ? activities.map((activity) => <article key={activity.id}><span className="activity-icon">↗</span><div><b>{activity.title}</b><small>{activity.date}</small></div><div className="activity-numbers"><span>{activity.distance}</span><span>{activity.time}</span><strong>Dokončeno</strong></div></article>) : <p className="empty-journal">Deník je zatím prázdný. Po první dokončené trase se sem uloží její vzdálenost a čas.</p>}</div>
     </section>
   );
 }

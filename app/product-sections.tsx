@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable @next/next/no-img-element -- The payment QR is generated as an in-memory data URL. */
+
 import QRCode from "qrcode";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
@@ -16,7 +18,6 @@ export type AppProfile = {
   home_city: string | null;
   bio: string | null;
   role: UserRole;
-  xp: number;
   created_at: string;
 };
 
@@ -33,7 +34,6 @@ export type RouteSummary = {
   status: "active" | "coming" | "seasonal";
   accent: string;
   available?: string;
-  xpReward: number;
   mapX: number;
   mapY: number;
 };
@@ -48,26 +48,9 @@ export type AuthController = {
   signOut: () => Promise<void>;
 };
 
-export const LEVELS = [
-  { level: 1, name: "Nováček", minXp: 0, icon: "·", unlock: "Profil a první trasa" },
-  { level: 2, name: "Stopař", minXp: 350, icon: "⌖", unlock: "Osobní statistiky" },
-  { level: 3, name: "Luštitel", minXp: 900, icon: "◇", unlock: "První profilový odznak" },
-  { level: 4, name: "Průzkumník", minXp: 1700, icon: "↗", unlock: "Žebříček městské části" },
-  { level: 5, name: "Kronikář", minXp: 2800, icon: "#", unlock: "Bonusová historická stopa" },
-  { level: 6, name: "Městochodec", minXp: 4300, icon: "◎", unlock: "Pokročilé výzvy" },
-  { level: 7, name: "Šifrant", minXp: 6200, icon: "△", unlock: "Speciální sezónní trasy" },
-  { level: 8, name: "Lovec příběhů", minXp: 8600, icon: "✦", unlock: "Prémiový profilový rámeček" },
-  { level: 9, name: "Mistr stop", minXp: 11500, icon: "♜", unlock: "Přednostní přístup k novinkám" },
-  { level: 10, name: "Legenda města", minXp: 15000, icon: "★", unlock: "Legendární odznak a titul" },
-] as const;
-
 function initials(name?: string | null, email?: string | null) {
   const source = name?.trim() || email?.split("@")[0] || "Hráč";
   return source.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
-}
-
-function currentLevel(xp: number) {
-  return [...LEVELS].reverse().find((item) => xp >= item.minXp) ?? LEVELS[0];
 }
 
 export function useSifrovanaAuth(): AuthController {
@@ -186,7 +169,7 @@ export function AuthModal({ auth, initialMode = "signin", onClose, onAuthenticat
         <span className="modal-symbol">Š</span>
         <span className="section-label">Skutečný účet</span>
         <h2 id="auth-title">{mode === "signin" ? "Vítej zpátky ve hře" : mode === "signup" ? "Zapiš se do kroniky" : mode === "reset" ? "Obnov si přístup" : "Nastav nové heslo"}</h2>
-        <p>{mode === "signup" ? "Účet uloží postup, XP, zakoupené trasy i odznaky." : "Přihlášení je zabezpečené a heslo aplikace nikdy neukládá."}</p>
+        <p>{mode === "signup" ? "Účet uloží zakoupené trasy, rozehraný postup i razítka v městském pasu." : "Přihlášení je zabezpečené a heslo aplikace nikdy neukládá."}</p>
         {!isSupabaseConfigured() && <p className="form-message error">Chybí připojení autentizační služby.</p>}
         <form onSubmit={submit}>
           {mode === "signup" && <label>Jméno<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>}
@@ -209,7 +192,7 @@ export function AuthModal({ auth, initialMode = "signin", onClose, onAuthenticat
 
 export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }: {
   auth: AuthController;
-  kind: "route" | "bundle" | "full";
+  kind: "route" | "bundle";
   route: RouteSummary;
   routes: RouteSummary[];
   onClose: () => void;
@@ -218,9 +201,9 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [order, setOrder] = useState<{ variableSymbol: string; qr: string | null } | null>(null);
-  const price = kind === "route" ? 250 : kind === "bundle" ? 500 : Math.round(routes.length * 250 * 0.5);
-  const selectedRoutes = kind === "route" ? [route.id] : kind === "bundle" ? routes.slice(0, 3).map((item) => item.id) : routes.map((item) => item.id);
-  const title = kind === "route" ? `${route.district}: ${route.title}` : kind === "bundle" ? "Balíček 3 tras" : `Celé Brno · ${routes.length} tras`;
+  const price = kind === "route" ? route.price : 999;
+  const selectedRoutes = kind === "route" ? [route.id] : routes.slice(0, 3).map((item) => item.id);
+  const title = kind === "route" ? `${route.district}: ${route.title}` : "Balíček 3 tras";
 
   async function createOrder() {
     const supabase = getSupabaseBrowserClient();
@@ -230,7 +213,7 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
     const variableSymbol = `${Date.now()}`.slice(-8) + Math.floor(Math.random() * 90 + 10);
     const { error: insertError } = await supabase.from("orders").insert({
       user_id: auth.user.id,
-      package_type: kind === "route" ? "single" : kind === "bundle" ? "trio" : "full_city",
+      package_type: kind === "route" ? "single" : "trio",
       route_ids: selectedRoutes,
       amount_czk: price,
       variable_symbol: variableSymbol,
@@ -257,16 +240,17 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title">
         <button className="modal-close" onClick={onClose} aria-label="Zavřít">×</button>
-        <span className="section-label">QR platba</span><h2 id="checkout-title">{order ? "Objednávka čeká na platbu" : "Ještě jeden krok a vyrážíš"}</h2>
+        <span className="section-label">Jedna licence pro celý tým</span><h2 id="checkout-title">{order ? "Objednávka čeká na platbu" : "Ještě jeden krok a vyrážíte"}</h2>
         {!order ? <>
-          <div className="checkout-item"><span>{kind === "route" ? "01" : kind === "bundle" ? "3×" : `${routes.length}×`}</span><div><small>{kind === "route" ? "TRASA" : "BALÍČEK"}</small><b>{title}</b><p>{selectedRoutes.length} {selectedRoutes.length === 1 ? "trasa" : selectedRoutes.length < 5 ? "trasy" : "tras"}</p></div><strong>{price} Kč</strong></div>
-          <div className="checkout-total"><span>Celkem</span><strong>{price} Kč</strong></div>
+          <div className="checkout-item"><span>{kind === "route" ? "01" : "3×"}</span><div><small>{kind === "route" ? "TRASA" : "BALÍČEK"}</small><b>{title}</b><p>Pro tým 1–5 lidí · {selectedRoutes.length} {selectedRoutes.length === 1 ? "trasa" : "trasy"}</p></div><strong>{price} Kč</strong></div>
+          <div className="checkout-benefits"><span>✓ Start kdykoliv</span><span>✓ Bez instalace</span><span>✓ Pauza a návrat</span></div>
+          <div className="checkout-total"><span>Celkem za tým</span><strong>{price} Kč</strong></div>
           {error && <p className="form-message error">{error}</p>}
-          <button className="button primary full" onClick={createOrder} disabled={busy}>{busy ? "Vytvářím objednávku…" : "Vygenerovat QR platbu →"}</button>
+          <button className="button primary full" onClick={createOrder} disabled={busy}>{busy ? "Vytvářím objednávku…" : "Vygenerovat QR pro tým →"}</button>
         </> : <div className="qr-payment">
           {order.qr ? <img src={order.qr} alt={`QR platba ${price} Kč, variabilní symbol ${order.variableSymbol}`} /> : <div className="qr-placeholder"><b>QR bude aktivní po doplnění účtu</b><small>V administraci hostingu chybí veřejný IBAN příjemce.</small></div>}
           <div><small>Částka</small><b>{price} Kč</b><small>Variabilní symbol</small><b>{order.variableSymbol}</b></div>
-          <p>Po odeslání platby ji superadmin zkontroluje a odemkne zakoupené trasy.</p>
+          <p>Po potvrzení platby se trasa odemkne celému vašemu týmu. Začít můžete, až se vám to bude hodit.</p>
           <button className="button primary full" onClick={onClose}>Hotovo</button>
         </div>}
       </div>
@@ -289,9 +273,9 @@ export function CityRouteMap({ routes, onBuy }: { routes: RouteSummary[]; onBuy:
       <aside className="map-route-detail">
         <span className="section-label">BRNO · {selected.district}</span>
         <h2>{selected.title}</h2><p>{selected.tagline}</p>
-        <div className="map-route-stats"><span><small>Délka</small><b>{selected.distance} km</b></span><span><small>Čas</small><b>{selected.duration}</b></span><span><small>XP</small><b>{selected.xpReward}</b></span></div>
-        <div className="map-price"><div><small>Jedna trasa</small><strong>250 Kč</strong></div><button className="button primary" onClick={() => onBuy(selected)}>Koupit trasu →</button></div>
-        <p className="map-availability">{selected.status === "active" ? "Připraveno ke hraní" : `Předprodej · ${selected.available ?? "připravujeme"}`}</p>
+        <div className="map-route-stats"><span><small>Délka</small><b>{selected.distance} km</b></span><span><small>Čas</small><b>{selected.duration}</b></span><span><small>Licence</small><b>Tým 1–5</b></span></div>
+        <div className="map-price"><div><small>Za celý tým</small><strong>{selected.price} Kč</strong></div><button className="button primary" onClick={() => onBuy(selected)} disabled={selected.status !== "active"}>{selected.status === "active" ? "Koupit pro tým →" : "Připravujeme"}</button></div>
+        <p className="map-availability">{selected.status === "active" ? "Připraveno ke hraní" : `Dostupné po terénním ověření · ${selected.available ?? "připravujeme"}`}</p>
       </aside>
     </section>
   );
@@ -300,26 +284,42 @@ export function CityRouteMap({ routes, onBuy }: { routes: RouteSummary[]; onBuy:
 export function ProfileExperience({ auth, completed, activities, badges, onLogin, onRegister }: {
   auth: AuthController;
   completed: boolean;
-  activities: Array<{ id: string; title: string; date: string; distance: string; time: string; xp: number }>;
+  activities: Array<{ id: string; title: string; date: string; distance: string; time: string }>;
   badges: Array<{ id: string; name: string; detail: string; icon: string; earned: boolean }>;
   onLogin: () => void;
   onRegister: () => void;
 }) {
-  const xp = (auth.profile?.xp ?? 0) + (completed ? 520 : 0);
-  const level = currentLevel(xp);
-  const next = LEVELS[level.level] ?? level;
-  const progress = level.level === 10 ? 100 : Math.max(0, Math.min(100, ((xp - level.minXp) / (next.minXp - level.minXp)) * 100));
   const name = auth.profile?.username || auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Městský hráč";
+  const completedRoutes = completed ? 1 : 0;
+  const earnedStamps = badges.filter((badge) => badge.earned).length;
+  const role = auth.profile?.role === "superadmin" ? "Superadmin" : auth.profile?.role === "route_manager" ? "Správce" : "Hráč";
 
-  if (!auth.loading && !auth.user) return <section className="page section-wrap signed-out-profile"><span className="section-label">Profil hráče</span><h1>Tvoje město. Tvůj příběh.</h1><p>Vytvoř si účet a ukládej XP, úrovně, zakoupené trasy i dokončené výpravy napříč zařízeními.</p><div className="profile-auth-actions"><button className="button primary" onClick={onRegister}>Vytvořit účet →</button><button className="text-button" onClick={onLogin}>Už mám účet</button></div></section>;
+  if (!auth.loading && !auth.user) return <section className="page section-wrap signed-out-profile"><span className="section-label">Městský pas</span><h1>Tvoje město. Tvoje objevy.</h1><p>Vytvoř si účet a měj zakoupené trasy, rozehraný postup i razítka z dokončených čtvrtí bezpečně na jednom místě.</p><div className="profile-auth-actions"><button className="button primary" onClick={onRegister}>Vytvořit městský pas →</button><button className="text-button dark" onClick={onLogin}>Už mám účet</button></div></section>;
 
   return (
     <section className="profile-page">
-      <div className="profile-hero"><div className="section-wrap profile-head"><div className="profile-avatar">{initials(name, auth.user?.email)}<span>{level.level}</span></div><div><span className="eyebrow light"><span /> {level.name.toUpperCase()}</span><h1>{name}</h1><p>{auth.profile?.home_city ?? "Brno"} · {auth.profile?.role === "superadmin" ? "Superadmin" : auth.profile?.role === "route_manager" ? "Správce trasy" : "Uživatel"}</p></div><div className="level-card"><span>LEVEL {level.level} · {level.name}</span><div><i style={{ width: `${progress}%` }} /></div><small>{level.level === 10 ? `${xp} XP · nejvyšší úroveň` : `${xp} / ${next.minXp} XP · zbývá ${next.minXp - xp} XP`}</small><p>Další odemčení: <b>{next.unlock}</b> <i>{next.icon}</i></p></div></div></div>
+      <div className="profile-hero">
+        <div className="section-wrap profile-head">
+          <div className="profile-avatar">{initials(name, auth.user?.email)}<span>{completed ? "✓" : "·"}</span></div>
+          <div><span className="eyebrow light"><span /> MĚSTSKÝ PAS</span><h1>{name}</h1><p>{auth.profile?.home_city ?? "Brno"} · {role}</p></div>
+          <div className="passport-card"><span>SBÍRKA BRNA</span><strong>{completedRoutes} ze 3 čtvrtí</strong><small>{completed ? "Královo Pole je v kronice. Další příběh připravujeme." : "První razítko čeká v Králově Poli."}</small></div>
+        </div>
+      </div>
       <div className="section-wrap profile-content">
-        <div className="stat-strip"><div><small>Celkem XP</small><b>{xp}</b></div><div><small>Úroveň</small><b>{level.level}<i> / 10</i></b></div><div><small>Dokončené trasy</small><b>{completed ? "1" : "0"}</b></div><div><small>Role</small><b className="role-stat">{auth.profile?.role === "superadmin" ? "Superadmin" : auth.profile?.role === "route_manager" ? "Správce" : "Hráč"}</b></div></div>
-        <section className="panel level-roadmap"><div className="panel-heading"><div><span className="section-label">Cesta městem</span><h2>10 úrovní průzkumníka</h2></div><span>{xp} XP</span></div><div className="level-grid">{LEVELS.map((item) => <article key={item.level} className={xp >= item.minXp ? "unlocked" : item.level === next.level ? "next" : "locked"}><span>{item.icon}<b>{item.level}</b></span><div><strong>{item.name}</strong><small>{item.minXp.toLocaleString("cs-CZ")} XP · {item.unlock}</small></div></article>)}</div></section>
-        <div className="profile-grid"><div className="profile-main"><section className="panel badges-panel"><div className="panel-heading"><div><span className="section-label">Sbírka</span><h2>Odznaky</h2></div><span>{badges.filter((badge) => badge.earned).length} / {badges.length}</span></div><div className="badges-grid">{badges.map((badge) => <article key={badge.id} className={badge.earned ? "earned" : "locked"}><span>{badge.icon}</span><b>{badge.name}</b><small>{badge.detail}</small></article>)}</div></section><section className="panel recent-panel"><div className="panel-heading"><div><span className="section-label">Deník</span><h2>Poslední výpravy</h2></div></div>{activities.slice(0, 3).map((activity) => <article key={activity.id}><span>↗</span><div><b>{activity.title}</b><small>{activity.date} · {activity.distance}</small></div><strong>+{activity.xp} XP</strong></article>)}</section></div><aside className="panel xp-system"><span className="section-label">Jak získáš XP</span><h2>Každá trasa má svou váhu</h2><p>Odměna vychází z délky, času a obtížnosti. Orientačně počítáme:</p><ul><li><b>40 XP</b> za každý kilometr</li><li><b>1 XP</b> za každé 2 minuty</li><li><b>× 1,0 / 1,25 / 1,5</b> podle obtížnosti</li></ul><p>Nápovědy mohou výslednou odměnu mírně snížit.</p></aside></div>
+        <div className="stat-strip"><div><small>Dokončené trasy</small><b>{completedRoutes}</b></div><div><small>Objevené čtvrti</small><b>{completedRoutes}</b></div><div><small>Ušlá vzdálenost</small><b>{completed ? "4,1 km" : "0 km"}</b></div><div><small>Razítka</small><b>{earnedStamps}</b></div></div>
+        <div className="profile-grid">
+          <div className="profile-main">
+            <section className="panel badges-panel">
+              <div className="panel-heading"><div><span className="section-label">Městský pas</span><h2>Razítka z výprav</h2></div><span>{earnedStamps} / {badges.length}</span></div>
+              <div className="badges-grid">{badges.map((badge) => <article key={badge.id} className={badge.earned ? "earned" : "locked"}><span>{badge.icon}</span><b>{badge.name}</b><small>{badge.detail}</small></article>)}</div>
+            </section>
+            <section className="panel recent-panel">
+              <div className="panel-heading"><div><span className="section-label">Deník</span><h2>Poslední výpravy</h2></div></div>
+              {activities.length === 0 ? <p className="empty-journal">Deník se naplní po první dokončené trase.</p> : activities.slice(0, 3).map((activity) => <article key={activity.id}><span>↗</span><div><b>{activity.title}</b><small>{activity.date} · {activity.distance}</small></div><strong>{activity.time}</strong></article>)}
+            </section>
+          </div>
+          <aside className="panel passport-next"><span className="section-label">Další výprava</span><h2>Brno-střed: Pod povrchem</h2><p>Skryté vrstvy centra, průchody a příběhy, kolem kterých se běžně jen projde.</p><ul><li>75–100 minut</li><li>přibližně 3,6 km</li><li>pro tým 1–5 lidí</li></ul><span className="passport-soon">Připravujeme</span></aside>
+        </div>
         <button className="reset-button" onClick={() => void auth.signOut()}>Odhlásit se</button>
       </div>
     </section>

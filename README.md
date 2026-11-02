@@ -1,19 +1,51 @@
 # Šifrovaná
 
-Mobilní městská šifrovací hra pro objevování Brna pěšky. Frontend běží na OpenAI Sites, autentizace a produktová data v Supabase.
+Šifrovaná je mobilní webová aplikace pro placené samoobslužné městské výpravy. Malý tým jde po městě, všímá si detailů, řeší krátké šifry a postupně odemyká příběh místa.
 
-## Produktová vrstva
+Pilotní trasou je **Královo Pole: Stopy proměny**. Jedna licence platí pro tým 1–5 lidí a stojí 449 Kč. Balíček tří tras za 999 Kč je produktová hypotéza; začne se prodávat teprve po terénním ověření tří hotových tras.
 
-- přihlášení e-mailem a heslem přes Supabase Auth;
-- připravené OAuth akce pro Google a Apple (vyžadují provider credentials v Supabase);
-- role `user`, `route_manager` a `superadmin` chráněné pomocí RLS;
-- 10 úrovní, XP historie a odemykané profilové odznaky;
-- 10 brněnských tras včetně Bystrce/Pryglu;
-- balíčky 1 trasa / 3 trasy / celé město;
-- QR objednávky schvalované superadminem;
-- editovatelné e-mailové šablony, partnerské leady a kontaktní zprávy.
+## Produktový směr
 
-## Prostředí
+- hlavní hodnotou je kvalitní trasa a jednoduchý mobilní průchod, ne složitá gamifikace;
+- jednotný rytmus hry: dojít → všimnout si → vyřešit → odemknout příběh → pokračovat;
+- profil funguje jako Městský pas s dokončenými výpravami a razítky, bez XP a levelů;
+- nápovědy nejsou placené ani trestané;
+- nové trasy jsou verzovaná data se zdroji, fallbackem a datem terénní kontroly, nikoli nový UI vývoj;
+- nejdřív se ověřuje placený pilot v Brně, potom další dvě brněnské trasy a až následně balíčky či další města.
+
+Podrobná rozhodovací pravidla jsou v [produktové konstituci](docs/PRODUCT_CONSTITUTION.md).
+
+## Aktuální stav
+
+- responzivní marketplace a detail pilotní trasy;
+- průchod pěti checkpointy s postupným odkrýváním, odpověďmi, nápovědami a lokálně uloženým postupem;
+- Městský pas, dokončení trasy, podpis a lokální náhled selfie;
+- Supabase Auth, role a databázový základ pro objednávky;
+- QR platba převodem po nastavení veřejného IBANu;
+- nasazení přes OpenAI Sites.
+
+Pilotní obsah je demonstrační a historické informace i fyzické indicie musí před ostrým prodejem projít terénní kontrolou.
+
+## Lokální vývoj
+
+Požadavky:
+
+- Node.js `>=22.13.0`;
+- pnpm `11.16.0`.
+
+```bash
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+Ověření změn:
+
+```bash
+pnpm lint
+pnpm test
+```
+
+## Proměnné prostředí
 
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=
@@ -21,105 +53,17 @@ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
 NEXT_PUBLIC_PAYMENT_IBAN=
 ```
 
-`NEXT_PUBLIC_PAYMENT_IBAN` je veřejný cílový účet ve formátu IBAN. Dokud není nastavený, objednávky fungují, ale aplikace záměrně nevytvoří neplatný platební QR kód.
+`NEXT_PUBLIC_PAYMENT_IBAN` je veřejný účet příjemce ve formátu IBAN. Bez něj lze vytvořit objednávku, ale aplikace záměrně nevygeneruje neplatný platební QR kód.
 
-## Vývoj
+## Struktura
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+- `app/` – uživatelské rozhraní a společný herní engine;
+- `lib/route-content.ts` – typovaný katalog měst, tras a checkpointů;
+- `lib/supabase/` – klient a serverové napojení Supabase;
+- `supabase/` – databázové migrace a e-mailové šablony;
+- `docs/PRODUCT_CONSTITUTION.md` – produktové mantinely, ekonomika a expanzní brány;
+- `tests/` – server-render a kontrola základních produktových kontraktů.
 
-## Prerequisites
+## Důležité omezení
 
-- Node.js `>=22.13.0`
-
-## Quick Start
-
-```bash
-npm install
-npm run dev
-npm run build
-```
-
-This starter does not use `wrangler.jsonc`.
-
-## Included Shape
-
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
-
-The user ID is stable for the same user on the same Site and different across Sites. Email and name are intended for display or contact purposes.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+Produkce zatím nemá skutečné GPS ověření, zdravotní API, automatické potvrzení plateb ani redakční systém. Přihlášení a objednávky používají Supabase; herní postup pilotu se stále ukládá lokálně v prohlížeči.
