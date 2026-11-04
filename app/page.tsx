@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element -- Selfie uses a local object URL and is never uploaded. */
 
-import { ChangeEvent, PointerEvent, useEffect, useRef, useState } from "react";
+import { ChangeEvent, PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   AdminCenter,
   AuthModal,
@@ -15,14 +15,14 @@ import {
   useSifrovanaAuth,
 } from "./product-sections";
 import { getSupabaseBrowserClient } from "../lib/supabase/client";
+import { CheckpointMap } from "./checkpoint-map";
+import { usePublishedGame } from "./use-published-game";
+import type { PublishedGameCheckpoint, PublishedGameSession } from "../lib/supabase/published-game";
 import {
   bundle,
   cities,
-  getRouteCheckpoints,
   pilotRouteId,
   routes,
-  type Checkpoint,
-  type RouteProduct,
 } from "../lib/route-content";
 
 type View = "discover" | "detail" | "library" | "game" | "finish" | "activity" | "profile" | "admin" | "partners" | "contact";
@@ -35,10 +35,41 @@ type StoredState = {
   activityAdded: boolean;
 };
 
-const demoRoute = routes.find((route) => route.id === pilotRouteId) ?? routes[0];
-const checkpoints = getRouteCheckpoints(demoRoute.id);
+type PublishedResult = {
+  checkpoint: PublishedGameCheckpoint;
+  fact: string;
+  nextClue: string;
+  completed: boolean;
+};
 
-const routeSummaries: RouteSummary[] = routes.map((route) => ({
+type GameCheckpoint = {
+  id: string;
+  routeId: string;
+  order: number;
+  title: string;
+  short: string;
+  coordinates: { lat: number; lng: number };
+  type: "online" | "physical" | "hybrid";
+  distanceFromPrevious: string;
+  story: string;
+  puzzle: { prompt: string; hints: [string, string] };
+  fallback: { prompt: string };
+  fact: string;
+  nextClue: string;
+  map: { x: number; y: number };
+};
+
+const routePreviewStops = [
+  { id: "start", order: 1, title: "Semilasso", map: { x: 14, y: 78 } },
+  { id: "hidden-2", order: 2, title: "Skrytá stopa", map: { x: 32, y: 63 } },
+  { id: "hidden-3", order: 3, title: "Skrytá stopa", map: { x: 52, y: 46 } },
+  { id: "hidden-4", order: 4, title: "Skrytá stopa", map: { x: 70, y: 31 } },
+  { id: "hidden-5", order: 5, title: "Skrytá stopa", map: { x: 88, y: 14 } },
+];
+
+const demoRoute = routes.find((route) => route.id === pilotRouteId) ?? routes[0];
+
+const staticRouteSummaries: RouteSummary[] = routes.map((route) => ({
   id: route.id,
   district: route.district,
   title: route.title,
@@ -70,12 +101,30 @@ const initialState: StoredState = {
 
 const storageKey = "sifrovana-demo-v1";
 
-function normalizeAnswer(value: string) {
-  return value.trim().toLocaleLowerCase("cs").normalize("NFD").replace(/[\u0300-\u036f\s]/g, "");
+function publishedCheckpointToView(checkpoint: PublishedGameCheckpoint, result: PublishedResult | null): GameCheckpoint {
+  const hint = (level: 1 | 2) => checkpoint.revealedHints.find((item) => item.level === level)?.hint ?? "";
+  const distance = checkpoint.distanceFromPreviousKm;
+  return {
+    id: checkpoint.id,
+    routeId: checkpoint.routeId,
+    order: checkpoint.position,
+    title: checkpoint.title,
+    short: checkpoint.shortTitle,
+    coordinates: checkpoint.coordinates,
+    type: checkpoint.type,
+    distanceFromPrevious: distance === null || distance === 0 ? "Start" : `${distance.toLocaleString("cs-CZ")} km`,
+    story: checkpoint.story,
+    puzzle: { prompt: checkpoint.puzzlePrompt, hints: [hint(1), hint(2)] },
+    fallback: { prompt: checkpoint.fallbackPrompt },
+    fact: result?.fact ?? checkpoint.fact ?? "",
+    nextClue: result?.nextClue ?? checkpoint.nextClue ?? "",
+    map: checkpoint.map,
+  };
 }
 
 export default function Home() {
   const auth = useSifrovanaAuth();
+  const publishedGame = usePublishedGame();
   const [view, setView] = useState<View>("discover");
   const [modal, setModal] = useState<Modal>(null);
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
@@ -90,18 +139,42 @@ export default function Home() {
   const [photo, setPhoto] = useState<string | null>(null);
   const [proofMode, setProofMode] = useState<"photo" | "signature" | "skip">("photo");
   const [checkoutItem, setCheckoutItem] = useState<"route" | "bundle">("route");
-  const [selectedRoute, setSelectedRoute] = useState<RouteSummary>(routeSummaries[0]);
+  const [catalogRoutes, setCatalogRoutes] = useState<RouteSummary[]>(staticRouteSummaries);
+  const [selectedRoute, setSelectedRoute] = useState<RouteSummary>(staticRouteSummaries[0]);
   const [resumeCheckout, setResumeCheckout] = useState(false);
   const [ownedRouteIds, setOwnedRouteIds] = useState<string[]>([]);
+  const [publishedResult, setPublishedResult] = useState<PublishedResult | null>(null);
+  const [gameMessage, setGameMessage] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawing = useRef(false);
+  const resumeAttemptedUser = useRef<string | null>(null);
+
+  const applyPublishedSession = useCallback((session: PublishedGameSession) => {
+    const currentCheckpoint = session.checkpoints.find(
+      (checkpoint) => checkpoint.position === session.progress.currentPosition,
+    );
+    setShownHints(currentCheckpoint?.revealedHints.length ?? 0);
+    setState((current) => ({
+      ...current,
+      progress: {
+        current: Math.max(0, session.progress.currentPosition - 1),
+        solved: session.progress.solvedCheckpointIds,
+        hintsUsed: session.progress.hintsUsed,
+        completed: Boolean(session.progress.completedAt),
+      },
+    }));
+  }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const saved = window.localStorage.getItem(storageKey);
       if (saved) {
         try {
-          setState(JSON.parse(saved) as StoredState);
+          const savedState = JSON.parse(saved) as Partial<StoredState>;
+          setState((current) => ({
+            ...current,
+            activityAdded: savedState.activityAdded === true,
+          }));
         } catch {
           window.localStorage.removeItem(storageKey);
         }
@@ -112,8 +185,47 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (hydrated) window.localStorage.setItem(storageKey, JSON.stringify(state));
-  }, [state, hydrated]);
+    if (hydrated) {
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({ activityAdded: state.activityAdded }),
+      );
+    }
+  }, [state.activityAdded, hydrated]);
+
+  useEffect(() => {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase) return;
+    let active = true;
+    supabase.from("routes").select("id,district,title,tagline,price_czk,distance_km,duration_minutes,difficulty,checkpoint_count,status,accent,map_x,map_y,available_text").then(({ data }) => {
+      if (!active || !data) return;
+      const byId = new Map(data.map((item) => [item.id as string, item]));
+      const nextRoutes = staticRouteSummaries.map((route) => {
+        const live = byId.get(route.id);
+        if (!live) return route;
+        const duration = Number(live.duration_minutes);
+        return {
+          ...route,
+          district: String(live.district),
+          title: String(live.title),
+          tagline: String(live.tagline),
+          price: Number(live.price_czk),
+          distance: Number(live.distance_km),
+          duration: Number.isFinite(duration) ? `${duration} min` : route.duration,
+          difficulty: String(live.difficulty),
+          checkpoints: Number(live.checkpoint_count),
+          status: live.status as RouteSummary["status"],
+          accent: String(live.accent),
+          mapX: Number(live.map_x),
+          mapY: Number(live.map_y),
+          available: live.available_text ? String(live.available_text) : route.available,
+        };
+      });
+      setCatalogRoutes(nextRoutes);
+      setSelectedRoute((current) => nextRoutes.find((route) => route.id === current.id) ?? nextRoutes[0]);
+    });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     const supabase = getSupabaseBrowserClient();
@@ -128,8 +240,71 @@ export default function Home() {
     return () => { active = false; };
   }, [auth.user]);
 
-  const activeCheckpoint = checkpoints[Math.min(state.progress.current, checkpoints.length - 1)];
-  const completed = state.progress.completed;
+  const resumeLastPublishedGame = publishedGame.resumeLast;
+  const clearPublishedGameError = publishedGame.clearError;
+
+  useEffect(() => {
+    if (auth.loading) return;
+    const userId = auth.user?.id;
+    if (!userId) {
+      resumeAttemptedUser.current = null;
+      return;
+    }
+    if (
+      !publishedGame.backendConfigured
+      || publishedGame.session
+      || resumeAttemptedUser.current === userId
+    ) return;
+
+    resumeAttemptedUser.current = userId;
+    let active = true;
+    void resumeLastPublishedGame(demoRoute.id)
+      .then((session) => {
+        if (!active || !session) return;
+        setArrived(false);
+        setAnswer("");
+        setAnswerStatus("idle");
+        setFallbackMode(false);
+        setPublishedResult(null);
+        setGameMessage("");
+        applyPublishedSession(session);
+        setView(session.progress.completedAt ? "finish" : "game");
+        window.scrollTo({ top: 0, behavior: "auto" });
+      })
+      .catch(() => {
+        if (active) clearPublishedGameError();
+      });
+    return () => { active = false; };
+  }, [
+    applyPublishedSession,
+    auth.loading,
+    auth.user?.id,
+    clearPublishedGameError,
+    publishedGame.backendConfigured,
+    publishedGame.session,
+    resumeLastPublishedGame,
+  ]);
+
+  const publishedCheckpoint = publishedResult?.checkpoint ?? publishedGame.currentCheckpoint;
+  const activeCheckpoint = publishedCheckpoint ? publishedCheckpointToView(publishedCheckpoint, publishedResult) : null;
+  const totalCheckpoints = publishedGame.session?.progress.checkpointCount
+    ?? catalogRoutes.find((route) => route.id === demoRoute.id)?.checkpoints
+    ?? routePreviewStops.length;
+  const solvedCount = publishedGame.session?.progress.solvedCheckpointIds.length ?? state.progress.solved.length;
+  const completed = Boolean(publishedGame.session?.progress.completedAt)
+    || state.progress.completed
+    || state.activityAdded;
+  const displayProgress: RouteProgress = publishedGame.session
+    ? {
+        current: Math.min(
+          publishedGame.session.progress.solvedCheckpointIds.length,
+          totalCheckpoints,
+        ),
+        solved: publishedGame.session.progress.solvedCheckpointIds,
+        hintsUsed: publishedGame.session.progress.hintsUsed,
+        completed,
+      }
+    : { ...state.progress, completed };
   const ownsPilotRoute = auth.profile?.role === "superadmin" || ownedRouteIds.includes(demoRoute.id);
   const earnedBadges = badges.map((badge) => (badge.id === "king" && completed ? { ...badge, earned: true } : badge));
   const activities = state.activityAdded
@@ -144,9 +319,10 @@ export default function Home() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function openPurchase(item: "route" | "bundle" = "route", route: RouteSummary = routeSummaries[0]) {
-    const bundleReady = bundle.routeIds.every((routeId) => routes.find((candidate) => candidate.id === routeId)?.status === "active");
-    if ((item === "route" && route.status !== "active") || (item === "bundle" && !bundleReady)) return;
+  function openPurchase(item: "route" | "bundle" = "route", requestedRoute?: RouteSummary) {
+    const route = requestedRoute ?? catalogRoutes[0];
+    const bundleReady = bundle.routeIds.every((routeId) => catalogRoutes.find((candidate) => candidate.id === routeId)?.status === "active");
+    if (!route || (item === "route" && route.status !== "active") || (item === "bundle" && !bundleReady)) return;
     setCheckoutItem(item);
     setSelectedRoute(route);
     setResumeCheckout(true);
@@ -165,16 +341,27 @@ export default function Home() {
     void auth.refreshProfile();
   }
 
-  function startGame() {
+  async function startGame() {
     resetCheckpointUi();
+    setGameMessage("");
     if (!ownsPilotRoute) {
       openPurchase("route");
       return;
     }
-    if (state.progress.completed) {
-      setState((current) => ({ ...current, progress: initialState.progress, activityAdded: current.activityAdded }));
+    if (!publishedGame.backendConfigured) {
+      setGameMessage("Herní server není nakonfigurovaný. Ostrou výpravu nelze spustit v offline režimu.");
+      navigate("library");
+      return;
     }
-    navigate("game");
+    try {
+      const session = await publishedGame.start(demoRoute.id);
+      setPublishedResult(null);
+      applyPublishedSession(session);
+      navigate(session.progress.completedAt ? "finish" : "game");
+    } catch (reason) {
+      setGameMessage(reason instanceof Error ? reason.message : "Publikovanou hru se nepodařilo spustit.");
+      navigate("library");
+    }
   }
 
   function resetCheckpointUi() {
@@ -183,49 +370,68 @@ export default function Home() {
     setAnswerStatus("idle");
     setShownHints(0);
     setFallbackMode(false);
+    setPublishedResult(null);
   }
 
-  function revealHint() {
+  async function revealHint() {
     if (shownHints >= 2) return;
-    setShownHints((count) => count + 1);
-    setState((current) => ({
-      ...current,
-      progress: { ...current.progress, hintsUsed: current.progress.hintsUsed + 1 },
-    }));
+    setGameMessage("");
+    try {
+      const result = await publishedGame.revealHint((shownHints + 1) as 1 | 2);
+      setShownHints((count) => Math.max(count, result.level));
+      setState((current) => ({ ...current, progress: { ...current.progress, hintsUsed: result.hintsUsed } }));
+    } catch (reason) {
+      setGameMessage(reason instanceof Error ? reason.message : "Nápovědu se nepodařilo načíst.");
+    }
   }
 
-  function checkAnswer() {
-    const normalized = normalizeAnswer(answer);
-    const acceptedAnswers = fallbackMode ? activeCheckpoint.fallback.answers : activeCheckpoint.puzzle.answers;
-    const valid = acceptedAnswers.some((item) => normalizeAnswer(item) === normalized);
-    setAnswerStatus(valid ? "correct" : "wrong");
+  async function checkAnswer() {
+    const checkpoint = publishedGame.currentCheckpoint;
+    if (!checkpoint) return;
+    setGameMessage("");
+    try {
+      const result = await publishedGame.submitAnswer({ checkpointId: checkpoint.id, answer, useFallback: fallbackMode });
+      if (!result.correct) {
+        setAnswerStatus("wrong");
+        return;
+      }
+      setPublishedResult({ checkpoint, fact: result.fact, nextClue: result.nextClue, completed: result.completed });
+      setAnswerStatus("correct");
+      setState((current) => ({
+        ...current,
+        progress: {
+          current: Math.max(0, result.session.progress.currentPosition - 1),
+          solved: result.session.progress.solvedCheckpointIds,
+          hintsUsed: result.session.progress.hintsUsed,
+          completed: false,
+        },
+      }));
+    } catch (reason) {
+      setGameMessage(reason instanceof Error ? reason.message : "Odpověď se nepodařilo ověřit.");
+    }
   }
 
   function toggleFallback() {
+    if (answerStatus === "correct") return;
     setFallbackMode((current) => !current);
     setAnswer("");
     setAnswerStatus("idle");
-    setShownHints(0);
+    setShownHints(publishedGame.currentCheckpoint?.revealedHints.length ?? 0);
   }
 
   function nextCheckpoint() {
-    const solved = Array.from(new Set([...state.progress.solved, activeCheckpoint.id]));
-    if (activeCheckpoint.order === checkpoints.length) {
-      setState((current) => ({
-        ...current,
-        progress: { ...current.progress, solved, completed: true },
-      }));
+    if (!publishedResult) return;
+    if (publishedResult.completed) {
+      setState((current) => ({ ...current, progress: { ...current.progress, completed: true } }));
+      setPublishedResult(null);
       navigate("finish");
       return;
     }
-    setState((current) => ({
-      ...current,
-      progress: { ...current.progress, current: current.progress.current + 1, solved },
-    }));
     resetCheckpointUi();
   }
 
   function finishRoute() {
+    publishedGame.clear();
     setState((current) => ({ ...current, activityAdded: true }));
     navigate("profile");
   }
@@ -313,13 +519,16 @@ export default function Home() {
       )}
 
       <main>
-        {view === "discover" && <Discover onDetail={() => navigate("detail")} onBuy={openPurchase} />}
-        {view === "detail" && <RouteDetail owned={ownsPilotRoute} onBack={() => navigate("discover")} onBuy={() => openPurchase("route")} onStart={startGame} />}
-        {view === "library" && <Library owned={ownsPilotRoute} progress={state.progress} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={() => navigate("detail")} />}
-        {view === "game" && (
+        {view === "discover" && <Discover routesForSale={catalogRoutes} onDetail={() => navigate("detail")} onBuy={openPurchase} />}
+        {view === "detail" && <RouteDetail price={catalogRoutes.find((route) => route.id === demoRoute.id)?.price ?? demoRoute.price} owned={ownsPilotRoute} onBack={() => navigate("discover")} onBuy={() => openPurchase("route")} onStart={startGame} />}
+        {view === "library" && <Library owned={ownsPilotRoute} progress={displayProgress} totalCheckpoints={totalCheckpoints} notice={gameMessage} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={() => navigate("detail")} />}
+        {view === "game" && activeCheckpoint && (
           <Game
             checkpoint={activeCheckpoint}
-            progress={state.progress}
+            totalCheckpoints={totalCheckpoints}
+            solvedCount={solvedCount}
+            message={gameMessage}
+            busy={publishedGame.busy}
             arrived={arrived}
             setArrived={setArrived}
             answer={answer}
@@ -335,9 +544,11 @@ export default function Home() {
             onExit={() => navigate("library")}
           />
         )}
+        {view === "game" && !activeCheckpoint && <section className="page section-wrap"><div className="empty-state"><span>!</span><h2>Checkpoint se nepodařilo načíst</h2><p>{gameMessage || "Vrať se do knihovny a spusť publikovanou trasu znovu."}</p><button className="button primary" onClick={() => navigate("library")}>Zpět do knihovny</button></div></section>}
         {view === "finish" && (
           <Finish
             hintsUsed={state.progress.hintsUsed}
+            totalCheckpoints={totalCheckpoints}
             proofMode={proofMode}
             setProofMode={setProofMode}
             photo={photo}
@@ -359,15 +570,15 @@ export default function Home() {
 
       <footer className="site-footer"><div className="section-wrap"><div><span className="brand-name">Šifrovaná<span className="brand-dot">.</span></span><small>Město není kulisa. Je to šifra.</small></div><nav><button onClick={() => navigate("partners")}>Pro podniky a provozovatele</button><button onClick={() => navigate("contact")}>Nahlásit chybu nebo nápad</button></nav></div></footer>
 
-      <nav className="bottom-nav" aria-label="Mobilní navigace">
+      {view !== "admin" && <nav className="bottom-nav" aria-label="Mobilní navigace">
         <BottomButton icon="⌖" label="Objevuj" active={view === "discover" || view === "detail"} onClick={() => navigate("discover")} />
         <BottomButton icon="◇" label="Moje hry" active={view === "library" || view === "game" || view === "finish"} onClick={() => navigate("library")} />
         <BottomButton icon="↗" label="Aktivita" active={view === "activity"} onClick={() => navigate("activity")} />
         <BottomButton icon="◉" label="Profil" active={view === "profile"} onClick={() => navigate("profile")} />
-      </nav>
+      </nav>}
 
       {modal === "login" && <AuthModal auth={auth} initialMode={authMode} onClose={() => setModal(null)} onAuthenticated={login} />}
-      {modal === "checkout" && <CheckoutModal auth={auth} kind={checkoutItem} route={selectedRoute} routes={routeSummaries} onClose={() => { setModal(null); setResumeCheckout(false); }} onCreated={buy} />}
+      {modal === "checkout" && <CheckoutModal auth={auth} kind={checkoutItem} route={selectedRoute} routes={catalogRoutes} onClose={() => { setModal(null); setResumeCheckout(false); }} onCreated={buy} />}
     </div>
   );
 }
@@ -380,13 +591,13 @@ function BottomButton({ icon, label, active, onClick }: { icon: string; label: s
   return <button className={active ? "active" : ""} onClick={onClick}><span>{icon}</span><b>{label}</b></button>;
 }
 
-function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "route" | "bundle", route?: RouteSummary) => void }) {
+function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSummary[]; onDetail: () => void; onBuy: (item: "route" | "bundle", route?: RouteSummary) => void }) {
   const bundleListPrice = bundle.routeIds.reduce(
-    (total, routeId) => total + (routes.find((route) => route.id === routeId)?.price ?? 0),
+    (total, routeId) => total + (routesForSale.find((route) => route.id === routeId)?.price ?? 0),
     0,
   );
   const bundleSavings = bundleListPrice - bundle.price;
-  const bundleReady = bundle.routeIds.every((routeId) => routes.find((route) => route.id === routeId)?.status === "active");
+  const bundleReady = bundle.routeIds.every((routeId) => routesForSale.find((route) => route.id === routeId)?.status === "active");
 
   return (
     <>
@@ -422,11 +633,11 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
       <section className="city-bar section-wrap">
         <div><span className="section-label">Vyber město</span><h2>Kde budeš pátrat?</h2></div>
         <div className="city-pills">
-          {cities.map((city) => <button key={city.id} className={city.active ? "active" : ""} disabled={!city.active}><span>{city.name}</span><small>{city.active ? `${routes.filter((route) => route.cityId === city.id && route.status === "active").length} aktivní · ${routes.filter((route) => route.cityId === city.id && route.status === "coming").length} připravujeme` : "později"}</small></button>)}
+          {cities.map((city) => <button key={city.id} className={city.active ? "active" : ""} disabled={!city.active}><span>{city.name}</span><small>{city.active ? `${routesForSale.filter((route) => route.status === "active").length} aktivní · ${routesForSale.filter((route) => route.status === "coming").length} připravujeme` : "později"}</small></button>)}
         </div>
       </section>
 
-      <CityRouteMap routes={routeSummaries} onBuy={(route) => onBuy("route", route)} />
+      <CityRouteMap routes={routesForSale} onBuy={(route) => onBuy("route", route)} />
 
       <section className="routes-section section-wrap">
         <div className="section-heading">
@@ -434,7 +645,7 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
           <span className="route-count">1 aktivní · 2 připravujeme</span>
         </div>
         <div className="route-grid">
-          {routes.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={onDetail} />)}
+          {routesForSale.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={onDetail} />)}
         </div>
       </section>
 
@@ -458,7 +669,7 @@ function Discover({ onDetail, onBuy }: { onDetail: () => void; onBuy: (item: "ro
   );
 }
 
-function RouteCard({ route, index, onDetail }: { route: RouteProduct; index: number; onDetail: () => void }) {
+function RouteCard({ route, index, onDetail }: { route: RouteSummary; index: number; onDetail: () => void }) {
   const active = route.status === "active";
   return (
     <article className={`route-card ${route.accent} ${!active ? "muted" : ""}`}>
@@ -480,7 +691,7 @@ function RouteCard({ route, index, onDetail }: { route: RouteProduct; index: num
   );
 }
 
-function RouteDetail({ owned, onBack, onBuy, onStart }: { owned: boolean; onBack: () => void; onBuy: () => void; onStart: () => void }) {
+function RouteDetail({ price, owned, onBack, onBuy, onStart }: { price: number; owned: boolean; onBack: () => void; onBuy: () => void; onStart: () => void | Promise<void> }) {
   return (
     <section className="detail-page">
       <div className="detail-hero">
@@ -492,17 +703,17 @@ function RouteDetail({ owned, onBack, onBuy, onStart }: { owned: boolean; onBack
             <p>Poskládej pět ztracených listů kroniky a odhal, jak se z vesnice za hradbami stala sebevědomá městská čtvrť.</p>
             <div className="detail-tags"><span>4,1 km</span><span>90–120 min</span><span>5 checkpointů</span><span>Střední</span></div>
           </div>
-          <div className="detail-map"><div className="map-path" />{checkpoints.map((cp) => <span key={cp.id} style={{ left: `${cp.map.x}%`, top: `${cp.map.y}%` }}>{cp.order}</span>)}<b>KRÁLOVO<br />POLE</b></div>
+          <div className="detail-map"><div className="map-path" />{routePreviewStops.map((cp) => <span key={cp.id} style={{ left: `${cp.map.x}%`, top: `${cp.map.y}%` }}>{cp.order === 1 ? "1" : "?"}</span>)}<b>KRÁLOVO<br />POLE</b></div>
         </div>
       </div>
       <div className="detail-content section-wrap">
         <div className="story-column">
           <span className="section-label">Tvůj úkol</span><h2>Kronika má pět prázdných stran</h2>
           <p className="lead">Někdo z ní vytrhl klíčové okamžiky. Zůstaly jen šifry rozeseté od Semilassa až ke staré strojírně. Najdi je dřív, než stopy zmizí.</p>
-          <div className="checkpoint-preview">{checkpoints.map((cp, index) => <div key={cp.id}><span>{index === 0 ? "⌖" : "?"}</span><div><b>{index === 0 ? cp.title : `Stopa ${index + 1} je skrytá`}</b><small>{index === 0 ? "Start výpravy" : "Odemkne se během hry"}</small></div></div>)}</div>
+          <div className="checkpoint-preview">{routePreviewStops.map((cp, index) => <div key={cp.id}><span>{index === 0 ? "⌖" : "?"}</span><div><b>{index === 0 ? cp.title : `Stopa ${index + 1} je skrytá`}</b><small>{index === 0 ? "Start výpravy" : "Odemkne se během hry"}</small></div></div>)}</div>
         </div>
         <aside className="purchase-card">
-          <div className="purchase-top"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{owned ? "Zakoupeno" : `${demoRoute.price} Kč`}</strong><small>Jednorázově · bez předplatného</small></div>
+          <div className="purchase-top"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{owned ? "Zakoupeno" : `${price} Kč`}</strong><small>Jednorázově · bez předplatného</small></div>
           <button className="button primary full" onClick={owned ? onStart : onBuy}>{owned ? "Vyrazit na trasu →" : "Koupit trasu →"}</button>
           <ul><li>✓ Hraješ vlastním tempem</li><li>✓ 2 úrovně nápovědy</li><li>✓ Přístup bez časového omezení</li><li>✓ Odznak Král KrPole</li></ul>
           <div className="gear"><b>Co s sebou?</b><p>Nabitý telefon, pohodlné boty, tužku a chuť dívat se kolem sebe.</p></div>
@@ -512,17 +723,18 @@ function RouteDetail({ owned, onBack, onBuy, onStart }: { owned: boolean; onBack
   );
 }
 
-function Library({ owned, progress, onDiscover, onStart, onDetail }: { owned: boolean; progress: RouteProgress; onDiscover: () => void; onStart: () => void; onDetail: () => void }) {
-  const percent = progress.completed ? 100 : Math.round((progress.current / checkpoints.length) * 100);
+function Library({ owned, progress, totalCheckpoints, notice, onDiscover, onStart, onDetail }: { owned: boolean; progress: RouteProgress; totalCheckpoints: number; notice: string; onDiscover: () => void; onStart: () => void | Promise<void>; onDetail: () => void }) {
+  const percent = progress.completed ? 100 : Math.round((progress.current / Math.max(totalCheckpoints, 1)) * 100);
   return (
     <section className="page section-wrap">
       <div className="page-heading"><span className="section-label">Tvoje sbírka</span><h1>Moje hry</h1><p>Zakoupené a rozehrané výpravy máš vždy po ruce.</p></div>
+      {notice && <p className="form-message error" role="alert">{notice}</p>}
       {!owned ? (
         <div className="empty-state"><span>◇</span><h2>Batoh je zatím prázdný</h2><p>Vyber si první trasu a začni sbírat městské stopy.</p><button className="button primary" onClick={onDiscover}>Objevit trasy →</button></div>
       ) : (
         <div className="owned-card">
           <div className="owned-visual"><span>01</span><div className="owned-pin">⌖</div></div>
-          <div className="owned-copy"><span className="district">BRNO · KRÁLOVO POLE</span><h2>Stopy proměny</h2><p>{progress.completed ? "Výprava dokončena. Kronika je kompletní." : progress.current > 0 ? `Čeká na tebe stopa ${progress.current + 1} z 5.` : "Vše je připraveno. První stopa čeká u Semilassa."}</p>
+          <div className="owned-copy"><span className="district">BRNO · KRÁLOVO POLE</span><h2>Stopy proměny</h2><p>{progress.completed ? "Výprava dokončena. Kronika je kompletní." : progress.current > 0 ? `Čeká na tebe stopa ${progress.current + 1} z ${totalCheckpoints}.` : "Vše je připraveno. První stopa čeká u Semilassa."}</p>
             <div className="progress-row"><div><i style={{ width: `${percent}%` }} /></div><span>{percent} %</span></div>
             <div className="owned-actions"><button className="button primary" onClick={onStart}>{progress.completed ? "Projít znovu" : progress.current > 0 ? "Pokračovat ve hře →" : "Zahájit výpravu →"}</button><button className="text-button dark" onClick={onDetail}>Detail trasy</button></div>
           </div>
@@ -532,40 +744,33 @@ function Library({ owned, progress, onDiscover, onStart, onDetail }: { owned: bo
   );
 }
 
-function Game({ checkpoint, progress, arrived, setArrived, answer, setAnswer, answerStatus, setAnswerStatus, shownHints, fallbackMode, onHint, onToggleFallback, onCheck, onNext, onExit }: {
-  checkpoint: Checkpoint; progress: RouteProgress; arrived: boolean; setArrived: (value: boolean) => void; answer: string; setAnswer: (value: string) => void; answerStatus: "idle" | "wrong" | "correct"; setAnswerStatus: (value: "idle" | "wrong" | "correct") => void; shownHints: number; fallbackMode: boolean; onHint: () => void; onToggleFallback: () => void; onCheck: () => void; onNext: () => void; onExit: () => void;
+function Game({ checkpoint, totalCheckpoints, solvedCount, message, busy, arrived, setArrived, answer, setAnswer, answerStatus, setAnswerStatus, shownHints, fallbackMode, onHint, onToggleFallback, onCheck, onNext, onExit }: {
+  checkpoint: GameCheckpoint; totalCheckpoints: number; solvedCount: number; message: string; busy: boolean; arrived: boolean; setArrived: (value: boolean) => void; answer: string; setAnswer: (value: string) => void; answerStatus: "idle" | "wrong" | "correct"; setAnswerStatus: (value: "idle" | "wrong" | "correct") => void; shownHints: number; fallbackMode: boolean; onHint: () => void | Promise<void>; onToggleFallback: () => void; onCheck: () => void | Promise<void>; onNext: () => void; onExit: () => void;
 }) {
   return (
     <section className="game-page">
-      <div className="game-topbar"><button onClick={onExit}>×</button><div><span>STOPY PROMĚNY</span><div><i style={{ width: `${((progress.current + (answerStatus === "correct" ? 1 : 0)) / checkpoints.length) * 100}%` }} /></div></div><b>{checkpoint.order}/5</b></div>
+      <div className="game-topbar"><button onClick={onExit}>×</button><div><span>STOPY PROMĚNY</span><div><i style={{ width: `${(solvedCount / Math.max(totalCheckpoints, 1)) * 100}%` }} /></div></div><b>{checkpoint.order}/{totalCheckpoints}</b></div>
       <div className="game-layout">
         <div className="game-map-panel">
-          <div className="live-map">
-            <span className="map-north">N<br />✦</span><div className="live-road r1" /><div className="live-road r2" /><div className="live-road r3" /><div className="live-road r4" />
-            <div className="live-path" />
-            {checkpoints.map((cp, index) => {
-              const status = index < checkpoint.order - 1 ? "done" : index === checkpoint.order - 1 ? "current" : "locked";
-              return <span key={cp.id} className={`live-pin ${status}`} style={{ left: `${cp.map.x}%`, top: `${cp.map.y}%` }}>{status === "done" ? "✓" : status === "locked" ? "?" : cp.order}</span>;
-            })}
-            <div className="map-location"><i /> Tvoje poloha <small>demo</small></div>
-          </div>
-          <div className="map-meta"><span><small>K dalšímu bodu</small><b>{checkpoint.distanceFromPrevious}</b></span><span><small>Vyřešené stopy</small><b>{Math.min(progress.solved.length + (answerStatus === "correct" ? 1 : 0), checkpoints.length)} / {checkpoints.length}</b></span><span><small>GPS</small><b className="ready">Připraveno</b></span></div>
+          <CheckpointMap title={checkpoint.title} coordinates={checkpoint.coordinates} />
+          <div className="map-meta"><span><small>K dalšímu bodu</small><b>{checkpoint.distanceFromPrevious}</b></span><span><small>Vyřešené stopy</small><b>{solvedCount} / {totalCheckpoints}</b></span><span><small>GPS</small><b className="ready">Připraveno</b></span></div>
         </div>
         <div className="puzzle-panel">
+          {message && <p className="form-message error" role="alert">{message}</p>}
           <div className="checkpoint-title"><span className="checkpoint-badge">STOPA {String(checkpoint.order).padStart(2, "0")}</span><small>{checkpoint.type === "online" ? "ONLINE ŠIFRA" : checkpoint.type === "physical" ? "FYZICKÁ STOPA" : "HYBRIDNÍ STOPA"}</small><h1>{checkpoint.title}</h1><p>{checkpoint.short} · {checkpoint.coordinates.lat.toFixed(4)}, {checkpoint.coordinates.lng.toFixed(4)}</p></div>
           {!arrived ? (
             <div className="arrival-card"><div className="radar"><i /><span>⌖</span></div><h2>Jsi na místě?</h2><p>V ostré hře checkpoint ověří GPS. V pilotu můžeš pokračovat odkudkoli.</p><button className="button primary full" onClick={() => setArrived(true)}>Jsem na místě – demo →</button><small>Simulace polohy · žádná data se neodesílají</small></div>
           ) : (
             <>
               <div className="story-card"><span>LIST Z KRONIKY</span><p>{checkpoint.story}</p></div>
-              <div className="cipher-card"><div className="cipher-title"><span>{fallbackMode ? "↺" : "#"}</span><div><small>{fallbackMode ? "ZÁLOŽNÍ ZADÁNÍ" : `ŠIFRA ${checkpoint.order}/5`}</small><h2>{fallbackMode ? "Pokračuj bez překážky" : "Rozlušti stopu"}</h2></div></div><p>{fallbackMode ? checkpoint.fallback.prompt : checkpoint.puzzle.prompt}</p>
+              <div className="cipher-card"><div className="cipher-title"><span>{fallbackMode ? "↺" : "#"}</span><div><small>{fallbackMode ? "ZÁLOŽNÍ ZADÁNÍ" : `ŠIFRA ${checkpoint.order}/${totalCheckpoints}`}</small><h2>{fallbackMode ? "Pokračuj bez překážky" : "Rozlušti stopu"}</h2></div></div><p>{fallbackMode ? checkpoint.fallback.prompt : checkpoint.puzzle.prompt}</p>
                 <button className="fallback-button" type="button" onClick={onToggleFallback}>{fallbackMode ? "← Zpět k původní šifře" : "Místo nejde přečíst? Použít záložní otázku"}</button>
-                <label htmlFor="answer">Tvoje odpověď</label><div className={`answer-row ${answerStatus}`}><input id="answer" value={answer} onChange={(event) => { setAnswer(event.target.value); setAnswerStatus("idle"); }} onKeyDown={(event) => event.key === "Enter" && onCheck()} placeholder="Napiš řešení…" autoComplete="off" /><button onClick={onCheck} disabled={!answer.trim()}>Ověřit</button></div>
+                <label htmlFor="answer">Tvoje odpověď</label><div className={`answer-row ${answerStatus}`}><input id="answer" value={answer} onChange={(event) => { setAnswer(event.target.value); setAnswerStatus("idle"); }} onKeyDown={(event) => { if (event.key === "Enter" && !busy) void onCheck(); }} placeholder="Napiš řešení…" autoComplete="off" /><button onClick={() => void onCheck()} disabled={!answer.trim() || busy}>{busy ? "Ověřuji…" : "Ověřit"}</button></div>
                 {answerStatus === "wrong" && <div className="answer-note wrong">{fallbackMode ? "To zatím nesedí. Zkus odpověď zapsat jinými slovy." : "To zatím nesedí. Rozhlédni se znovu nebo použij nápovědu."}</div>}
                 {!fallbackMode && shownHints > 0 && <div className="hint"><b>Nápověda {shownHints}</b><p>{checkpoint.puzzle.hints[shownHints - 1]}</p></div>}
-                {!fallbackMode && answerStatus !== "correct" && <button className="hint-button" onClick={onHint} disabled={shownHints >= 2}>◎ {shownHints >= 2 ? "Všechny nápovědy použity" : `Chci nápovědu ${shownHints + 1}`}</button>}
+                {!fallbackMode && answerStatus !== "correct" && <button className="hint-button" onClick={() => void onHint()} disabled={shownHints >= 2 || busy}>◎ {shownHints >= 2 ? "Všechny nápovědy použity" : `Chci nápovědu ${shownHints + 1}`}</button>}
               </div>
-              {answerStatus === "correct" && <div className="success-card"><span className="success-mark">✓</span><div><small>STOPA ROZLUŠTĚNA</small><h2>{checkpoint.order === 5 ? "Kronika je kompletní!" : "Máš další list kroniky"}</h2><p>{checkpoint.fact}</p><div className="next-clue"><small>{checkpoint.order === 5 ? "ZÁVĚR" : "DALŠÍ STOPA"}</small><b>{checkpoint.nextClue}</b></div><button className="button primary full" onClick={onNext}>{checkpoint.order === 5 ? "Dokončit výpravu →" : "Odhalit další checkpoint →"}</button></div></div>}
+              {answerStatus === "correct" && <div className="success-card"><span className="success-mark">✓</span><div><small>STOPA ROZLUŠTĚNA</small><h2>{checkpoint.order === totalCheckpoints ? "Kronika je kompletní!" : "Máš další list kroniky"}</h2><p>{checkpoint.fact}</p><div className="next-clue"><small>{checkpoint.order === totalCheckpoints ? "ZÁVĚR" : "DALŠÍ STOPA"}</small><b>{checkpoint.nextClue}</b></div><button className="button primary full" onClick={onNext}>{checkpoint.order === totalCheckpoints ? "Dokončit výpravu →" : "Odhalit další checkpoint →"}</button></div></div>}
             </>
           )}
         </div>
@@ -574,14 +779,14 @@ function Game({ checkpoint, progress, arrived, setArrived, answer, setAnswer, an
   );
 }
 
-function Finish({ hintsUsed, proofMode, setProofMode, photo, onPhoto, canvasRef, onPointerDown, onPointerMove, onPointerUp, onClear, onFinish }: {
-  hintsUsed: number; proofMode: "photo" | "signature" | "skip"; setProofMode: (mode: "photo" | "signature" | "skip") => void; photo: string | null; onPhoto: (event: ChangeEvent<HTMLInputElement>) => void; canvasRef: React.RefObject<HTMLCanvasElement | null>; onPointerDown: (event: PointerEvent<HTMLCanvasElement>) => void; onPointerMove: (event: PointerEvent<HTMLCanvasElement>) => void; onPointerUp: () => void; onClear: () => void; onFinish: () => void;
+function Finish({ hintsUsed, totalCheckpoints, proofMode, setProofMode, photo, onPhoto, canvasRef, onPointerDown, onPointerMove, onPointerUp, onClear, onFinish }: {
+  hintsUsed: number; totalCheckpoints: number; proofMode: "photo" | "signature" | "skip"; setProofMode: (mode: "photo" | "signature" | "skip") => void; photo: string | null; onPhoto: (event: ChangeEvent<HTMLInputElement>) => void; canvasRef: React.RefObject<HTMLCanvasElement | null>; onPointerDown: (event: PointerEvent<HTMLCanvasElement>) => void; onPointerMove: (event: PointerEvent<HTMLCanvasElement>) => void; onPointerUp: () => void; onClear: () => void; onFinish: () => void;
 }) {
   return (
     <section className="finish-page">
       <div className="confetti"><i /><i /><i /><i /><i /><i /></div>
       <div className="finish-intro"><span className="finish-crown">♛</span><span className="eyebrow light"><span /> VÝPRAVA DOKONČENA</span><h1>Královo Pole<br /><em>už před tebou nic neskryje.</em></h1><p>Pět stop, čtyři kilometry a jedna zachráněná kronika. Dobrá práce, Kláro.</p></div>
-      <div className="finish-stats"><div><small>Čas</small><b>1:34:12</b></div><div><small>Vzdálenost</small><b>4,1 km</b></div><div><small>Stopy</small><b>{checkpoints.length} / {checkpoints.length}</b></div><div><small>Nápovědy</small><b>{hintsUsed}</b></div></div>
+      <div className="finish-stats"><div><small>Čas</small><b>1:34:12</b></div><div><small>Vzdálenost</small><b>4,1 km</b></div><div><small>Stopy</small><b>{totalCheckpoints} / {totalCheckpoints}</b></div><div><small>Nápovědy</small><b>{hintsUsed}</b></div></div>
       <div className="badge-award"><div className="big-badge"><span>♛</span><i>KRÁL<br />KRPOLE</i></div><div><span className="section-label">Nový odznak</span><h2>Král KrPole</h2><p>Za kompletní rozluštění pěti stop proměny Králova Pole.</p></div></div>
       <div className="proof-card">
         <div className="proof-heading"><div><span className="section-label">Zanech stopu</span><h2>Jak si výpravu zapamatuješ?</h2></div><p>Volitelné · zůstává jen v tomto zařízení</p></div>

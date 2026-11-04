@@ -39,3 +39,6 @@ server.*.log
 /.wrangler/
 /outputs/
 /work/
+*.tsbuildinfo
+/supabase/.temp/
+/.private/

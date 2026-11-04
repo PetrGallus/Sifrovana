@@ -43,7 +43,6 @@ test("contains the versioned local-first route model", async () => {
   assert.match(page, /Jak se hraje Šifrovaná/);
   assert.match(routeContent, /export type City =/);
   assert.match(routeContent, /export type RouteProduct =/);
-  assert.match(routeContent, /export type Checkpoint =/);
   assert.match(routeContent, /export type RouteLifecycle =/);
   assert.match(routeContent, /version: string/);
   assert.match(routeContent, /audience: RouteAudience\[\]/);
@@ -51,17 +50,11 @@ test("contains the versioned local-first route model", async () => {
   assert.match(routeContent, /accessibilityNote: string/);
   assert.match(routeContent, /safetyNote: string/);
   assert.match(routeContent, /lastFieldCheck: string \| null/);
-  assert.match(routeContent, /fallback: \{ prompt: string; answers: string\[\] \}/);
   assert.match(routeContent, /sourceRefs: SourceRef\[\]/);
-  assert.match(routeContent, /export const checkpoints: Checkpoint\[\] = \[/);
-  for (const id of ["semilasso", "radnice", "slovanske-namesti", "kartouza", "strojirna"]) {
-    assert.match(routeContent, new RegExp(`id: "${id}"`));
-  }
-  assert.match(routeContent, /"1876"/);
-  assert.match(routeContent, /"domovu"/);
-  assert.match(routeContent, /"svoboda"/);
-  assert.match(routeContent, /"1375"/);
-  assert.match(routeContent, /"1890"/);
+  assert.doesNotMatch(routeContent, /accepted_answers|fallback_answers|answers:\s*\[/);
+  assert.doesNotMatch(page, /getRouteCheckpoints|puzzle\.answers|fallback\.answers/);
+  assert.match(page, /usePublishedGame\(\)/);
+  assert.match(page, /submitAnswer\(/);
   assert.match(routeContent, /price: 449/);
   assert.match(routeContent, /price: 999/);
   assert.doesNotMatch(routeContent, /xpReward/);
@@ -71,4 +64,22 @@ test("contains the versioned local-first route model", async () => {
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   await assert.rejects(access(new URL("../app/_sites-preview", templateRoot)));
+});
+
+test("keeps map navigation provider-neutral and reveals only the current checkpoint", async () => {
+  const [mapComponent, mapLinks, cms] = await Promise.all([
+    readFile(new URL("../app/checkpoint-map.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/map-links.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/route-cms.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(mapComponent, /navigator\.geolocation\.getCurrentPosition/);
+  assert.match(mapComponent, /zobrazen je pouze aktuální bod/);
+  assert.match(mapComponent, /Navigovat v Mapy\.com/);
+  assert.match(mapComponent, /Google Maps/);
+  assert.match(mapLinks, /mapy\.com\/fnc\/v1\/route\?end=/);
+  assert.match(mapLinks, /www\.google\.com\/maps\/dir\/\?api=1/);
+  assert.match(mapLinks, /openstreetmap\.org\/export\/embed\.html/);
+  assert.match(cms, /Zkontrolovat v Mapy\.com/);
+  assert.match(cms, /Zkontrolovat v Google Maps/);
 });

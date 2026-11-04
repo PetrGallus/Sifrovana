@@ -6,6 +6,8 @@ import QRCode from "qrcode";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "../lib/supabase/client";
+import { DiscountAdmin } from "./discount-admin";
+import { RouteCms } from "./route-cms";
 
 export type UserRole = "user" | "route_manager" | "superadmin";
 
@@ -200,40 +202,52 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [order, setOrder] = useState<{ variableSymbol: string; qr: string | null } | null>(null);
+  const [couponCode, setCouponCode] = useState("");
+  const [order, setOrder] = useState<{ id: string; variableSymbol: string; qr: string | null; amount: number; gross: number; discount: number } | null>(null);
   const price = kind === "route" ? route.price : 999;
-  const selectedRoutes = kind === "route" ? [route.id] : routes.slice(0, 3).map((item) => item.id);
+  const routeCount = kind === "route" ? 1 : Math.min(3, routes.length);
   const title = kind === "route" ? `${route.district}: ${route.title}` : "Balíček 3 tras";
 
   async function createOrder() {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !auth.user) return;
+    if (kind !== "route") {
+      setError("Balíček bude možné koupit po publikaci všech zahrnutých tras.");
+      return;
+    }
     setBusy(true);
     setError("");
-    const variableSymbol = `${Date.now()}`.slice(-8) + Math.floor(Math.random() * 90 + 10);
-    const { error: insertError } = await supabase.from("orders").insert({
-      user_id: auth.user.id,
-      package_type: kind === "route" ? "single" : "trio",
-      route_ids: selectedRoutes,
-      amount_czk: price,
-      variable_symbol: variableSymbol,
-      status: "pending",
+    const { data, error: orderError } = await supabase.rpc("create_route_checkout_order", {
+      p_route_id: route.id,
+      p_discount_code: couponCode.trim() || null,
     });
-    if (insertError) {
-      setError(insertError.message);
+    if (orderError || !data) {
+      setError(orderError?.message ?? "Objednávku se nepodařilo vytvořit.");
       setBusy(false);
       return;
     }
+    const created = data as { order_id: string; variable_symbol: string; amount_czk: number; gross_amount_czk: number; discount_amount_czk: number };
 
     const iban = process.env.NEXT_PUBLIC_PAYMENT_IBAN?.replace(/\s/g, "");
     let qr: string | null = null;
     if (iban) {
-      const spd = `SPD*1.0*ACC:${iban}*AM:${price.toFixed(2)}*CC:CZK*X-VS:${variableSymbol}*MSG:SIFROVANA`;
+      const spd = `SPD*1.0*ACC:${iban}*AM:${created.amount_czk.toFixed(2)}*CC:CZK*X-VS:${created.variable_symbol}*MSG:SIFROVANA`;
       qr = await QRCode.toDataURL(spd, { margin: 1, width: 280, color: { dark: "#0e3b3a", light: "#fffdf7" } });
     }
-    setOrder({ variableSymbol, qr });
+    setOrder({ id: created.order_id, variableSymbol: created.variable_symbol, qr, amount: created.amount_czk, gross: created.gross_amount_czk, discount: created.discount_amount_czk });
     setBusy(false);
     onCreated();
+  }
+
+  async function cancelOrder() {
+    const supabase = getSupabaseBrowserClient();
+    if (!supabase || !order || busy) return;
+    setBusy(true);
+    const { error: cancelError } = await supabase.rpc("cancel_checkout_order", { p_order_id: order.id });
+    setBusy(false);
+    if (cancelError) return setError(cancelError.message);
+    setOrder(null);
+    setError("");
   }
 
   return (
@@ -242,16 +256,19 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
         <button className="modal-close" onClick={onClose} aria-label="Zavřít">×</button>
         <span className="section-label">Jedna licence pro celý tým</span><h2 id="checkout-title">{order ? "Objednávka čeká na platbu" : "Ještě jeden krok a vyrážíte"}</h2>
         {!order ? <>
-          <div className="checkout-item"><span>{kind === "route" ? "01" : "3×"}</span><div><small>{kind === "route" ? "TRASA" : "BALÍČEK"}</small><b>{title}</b><p>Pro tým 1–5 lidí · {selectedRoutes.length} {selectedRoutes.length === 1 ? "trasa" : "trasy"}</p></div><strong>{price} Kč</strong></div>
+          <div className="checkout-item"><span>{kind === "route" ? "01" : "3×"}</span><div><small>{kind === "route" ? "TRASA" : "BALÍČEK"}</small><b>{title}</b><p>Pro tým 1–5 lidí · {routeCount} {routeCount === 1 ? "trasa" : "trasy"}</p></div><strong>{price} Kč</strong></div>
           <div className="checkout-benefits"><span>✓ Start kdykoliv</span><span>✓ Bez instalace</span><span>✓ Pauza a návrat</span></div>
+          <label className="checkout-coupon">Slevový kupón <small>(nepovinné)</small><div><input value={couponCode} onChange={(event) => setCouponCode(event.target.value.toUpperCase())} autoCapitalize="characters" autoComplete="off" spellCheck={false} placeholder="Např. PODZIM20" /><span>Ověří se bezpečně při vytvoření objednávky</span></div></label>
           <div className="checkout-total"><span>Celkem za tým</span><strong>{price} Kč</strong></div>
           {error && <p className="form-message error">{error}</p>}
           <button className="button primary full" onClick={createOrder} disabled={busy}>{busy ? "Vytvářím objednávku…" : "Vygenerovat QR pro tým →"}</button>
         </> : <div className="qr-payment">
-          {order.qr ? <img src={order.qr} alt={`QR platba ${price} Kč, variabilní symbol ${order.variableSymbol}`} /> : <div className="qr-placeholder"><b>QR bude aktivní po doplnění účtu</b><small>V administraci hostingu chybí veřejný IBAN příjemce.</small></div>}
-          <div><small>Částka</small><b>{price} Kč</b><small>Variabilní symbol</small><b>{order.variableSymbol}</b></div>
+          {order.qr ? <img src={order.qr} alt={`QR platba ${order.amount} Kč, variabilní symbol ${order.variableSymbol}`} /> : <div className="qr-placeholder"><b>QR bude aktivní po doplnění účtu</b><small>V administraci hostingu chybí veřejný IBAN příjemce.</small></div>}
+          <div><small>Částka</small><b>{order.amount} Kč</b>{order.discount > 0 && <><small>Původní cena</small><b>{order.gross} Kč</b><small>Slevový kupón</small><b>− {order.discount} Kč</b></>}<small>Variabilní symbol</small><b>{order.variableSymbol}</b></div>
           <p>Po potvrzení platby se trasa odemkne celému vašemu týmu. Začít můžete, až se vám to bude hodit.</p>
           <button className="button primary full" onClick={onClose}>Hotovo</button>
+          <button className="reset-button" onClick={() => void cancelOrder()} disabled={busy}>{busy ? "Ruším…" : "Zrušit tuto objednávku"}</button>
+          {error && <p className="form-message error">{error}</p>}
         </div>}
       </div>
     </div>
@@ -326,10 +343,11 @@ export function ProfileExperience({ auth, completed, activities, badges, onLogin
   );
 }
 
-type OrderRow = { id: string; user_id: string; package_type: string; route_ids: string[]; amount_czk: number; variable_symbol: string; status: string; created_at: string };
+type OrderRow = { id: string; user_id: string; package_type: string; route_ids: string[]; amount_czk: number; discount_amount_czk?: number; variable_symbol: string; status: string; created_at: string };
 type EmailTemplate = { id: string; name: string; subject: string; body_html: string; variables: string[] };
 
 export function AdminCenter({ auth }: { auth: AuthController }) {
+  const [section, setSection] = useState<"routes" | "orders" | "discounts" | "emails">("routes");
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [templates, setTemplates] = useState<EmailTemplate[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<EmailTemplate | null>(null);
@@ -355,12 +373,24 @@ export function AdminCenter({ auth }: { auth: AuthController }) {
   async function approve(order: OrderRow) {
     if (!supabase || !auth.user) return;
     setMessage("");
-    const accessRows = order.route_ids.map((routeId) => ({ user_id: order.user_id, route_id: routeId, order_id: order.id }));
-    const { error: accessError } = await supabase.from("user_route_access").upsert(accessRows);
-    if (accessError) return setMessage(accessError.message);
-    const { error } = await supabase.from("orders").update({ status: "paid", approved_by: auth.user.id, approved_at: new Date().toISOString() }).eq("id", order.id);
+    const { data, error } = await supabase.rpc("finalize_order_paid", { p_order_id: order.id });
     if (error) return setMessage(error.message);
-    setMessage(`Platba ${order.variable_symbol} je schválená a trasy odemčené.`);
+    const result = data as { paid?: boolean; expired?: boolean } | null;
+    if (!result?.paid) {
+      setMessage(result?.expired ? `Objednávka ${order.variable_symbol} vypršela a byla zrušena.` : "Platbu se nepodařilo potvrdit.");
+      await load();
+      return;
+    }
+    setMessage(`Platba ${order.variable_symbol} je schválená a trasy jsou odemčené.`);
+    await load();
+  }
+
+  async function cancel(order: OrderRow) {
+    if (!supabase || !auth.user) return;
+    setMessage("");
+    const { error } = await supabase.rpc("cancel_checkout_order", { p_order_id: order.id });
+    if (error) return setMessage(error.message);
+    setMessage(`Objednávka ${order.variable_symbol} je zrušená; případná rezervace kupónu se uvolnila.`);
     await load();
   }
 
@@ -372,10 +402,23 @@ export function AdminCenter({ auth }: { auth: AuthController }) {
   }
 
   if (!auth.user) return <section className="page section-wrap"><h1>Správa aplikace</h1><p>Pro vstup se přihlas.</p></section>;
-  if (auth.profile?.role === "route_manager") return <section className="page section-wrap"><span className="section-label">Správce trasy</span><h1>Správa obsahu tras</h1><p>Tady uvidíš svěřené trasy, checkpointy a hlášení. Přiřazení konkrétní trasy provádí superadmin.</p></section>;
-  if (auth.profile?.role !== "superadmin") return <section className="page section-wrap"><h1>Přístup jen pro správce</h1><p>Tvůj účet má roli uživatele.</p></section>;
+  if (auth.profile?.role !== "route_manager" && auth.profile?.role !== "superadmin") return <section className="page section-wrap"><h1>Přístup jen pro správce</h1><p>Tvůj účet má roli uživatele.</p></section>;
 
-  return <section className="page section-wrap admin-page"><div className="page-heading"><span className="section-label">Superadmin</span><h1>Řídicí centrum</h1><p>QR platby, přístupy k trasám a komunikace na jednom místě.</p></div>{message && <p className="admin-message">{message}</p>}<div className="admin-grid"><section className="panel admin-orders"><div className="panel-heading"><div><span className="section-label">Čeká na kontrolu</span><h2>QR platby</h2></div><span>{orders.filter((order) => order.status === "pending").length}</span></div>{orders.length === 0 ? <p>Zatím žádné objednávky.</p> : orders.map((order) => <article key={order.id}><div><b>{order.amount_czk} Kč · VS {order.variable_symbol}</b><small>{order.package_type} · {order.route_ids.length} tras · {new Date(order.created_at).toLocaleDateString("cs-CZ")}</small></div><span className={`order-status ${order.status}`}>{order.status}</span>{order.status === "pending" && <button onClick={() => approve(order)}>Označit zaplaceno</button>}</article>)}</section><section className="panel email-editor"><div className="panel-heading"><div><span className="section-label">Komunikace</span><h2>E-mailové šablony</h2></div></div><div className="template-tabs">{templates.map((template) => <button key={template.id} className={selectedTemplate?.id === template.id ? "active" : ""} onClick={() => setSelectedTemplate(template)}>{template.name}</button>)}</div>{selectedTemplate && <><label>Předmět<input value={selectedTemplate.subject} onChange={(event) => setSelectedTemplate({ ...selectedTemplate, subject: event.target.value })} /></label><label>HTML tělo<textarea rows={10} value={selectedTemplate.body_html} onChange={(event) => setSelectedTemplate({ ...selectedTemplate, body_html: event.target.value })} /></label><small>Proměnné: {selectedTemplate.variables.map((item) => `{{${item}}}`).join(", ")}</small><button className="button primary" onClick={saveTemplate}>Uložit šablonu</button></>}</section></div></section>;
+  const isSuperadmin = auth.profile.role === "superadmin";
+  return <section className="page admin-page">
+    <div className="section-wrap page-heading"><span className="section-label">{isSuperadmin ? "Superadmin" : "Správce trasy"}</span><h1>Řídicí centrum</h1><p>Obsah tras, terénní kontrola{isSuperadmin ? ", platby a komunikace" : " a předání k publikaci"} na jednom místě.</p></div>
+    <nav className="section-wrap admin-primary-nav" aria-label="Sekce administrace">
+      <button className={section === "routes" ? "active" : ""} onClick={() => setSection("routes")}>Obsah tras</button>
+      {isSuperadmin && <button className={section === "orders" ? "active" : ""} onClick={() => setSection("orders")}>Objednávky <span>{orders.filter((order) => order.status === "pending").length}</span></button>}
+      {isSuperadmin && <button className={section === "discounts" ? "active" : ""} onClick={() => setSection("discounts")}>Slevové kupóny</button>}
+      {isSuperadmin && <button className={section === "emails" ? "active" : ""} onClick={() => setSection("emails")}>E-maily</button>}
+    </nav>
+    {message && <p className="admin-message section-wrap" role="status">{message}</p>}
+    {section === "routes" && <RouteCms auth={auth} onMessage={setMessage} />}
+    {isSuperadmin && section === "orders" && <div className="section-wrap"><section className="panel admin-orders"><div className="panel-heading"><div><span className="section-label">Čeká na kontrolu</span><h2>QR platby</h2></div><span>{orders.filter((order) => order.status === "pending").length}</span></div>{orders.length === 0 ? <p>Zatím žádné objednávky.</p> : orders.map((order) => <article key={order.id}><div><b>{order.amount_czk} Kč · VS {order.variable_symbol}</b><small>{order.package_type} · {order.route_ids.length} tras · {new Date(order.created_at).toLocaleDateString("cs-CZ")}{order.discount_amount_czk ? ` · sleva ${order.discount_amount_czk} Kč` : ""}</small></div><span className={`order-status ${order.status}`}>{order.status}</span>{order.status === "pending" && <div className="admin-order-actions"><button onClick={() => approve(order)}>Označit zaplaceno</button><button className="secondary" onClick={() => cancel(order)}>Zrušit</button></div>}</article>)}</section></div>}
+    {isSuperadmin && section === "discounts" && <DiscountAdmin onMessage={setMessage} />}
+    {isSuperadmin && section === "emails" && <div className="section-wrap"><section className="panel email-editor"><div className="panel-heading"><div><span className="section-label">Komunikace</span><h2>E-mailové šablony</h2></div></div><div className="template-tabs">{templates.map((template) => <button key={template.id} className={selectedTemplate?.id === template.id ? "active" : ""} onClick={() => setSelectedTemplate(template)}>{template.name}</button>)}</div>{selectedTemplate && <><label>Předmět<input value={selectedTemplate.subject} onChange={(event) => setSelectedTemplate({ ...selectedTemplate, subject: event.target.value })} /></label><label>HTML tělo<textarea rows={10} value={selectedTemplate.body_html} onChange={(event) => setSelectedTemplate({ ...selectedTemplate, body_html: event.target.value })} /></label><small>Proměnné: {selectedTemplate.variables.map((item) => `{{${item}}}`).join(", ")}</small><button className="button primary" onClick={saveTemplate}>Uložit šablonu</button></>}</section></div>}
+  </section>;
 }
 
 export function PartnerSection() {
