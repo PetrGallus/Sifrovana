@@ -1,4 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  normalizePreschoolStatus,
+  normalizeStrollerStatus,
+  type RoutePreschoolStatus,
+  type RouteStrollerStatus,
+} from "../route-suitability";
 
 export type PublishedGameHintLevel = 1 | 2;
 
@@ -14,6 +20,8 @@ export type PublishedGameRoute = {
   distanceKm: number;
   durationMin: number;
   durationMax: number;
+  strollerStatus: RouteStrollerStatus;
+  preschoolStatus: RoutePreschoolStatus;
   difficulty: string;
   accessibilityNote: string;
   safetyNote: string;
@@ -147,6 +155,8 @@ function mapRoute(value: unknown): PublishedGameRoute {
     distanceKm: asNumber(route.distance_km, "route.distance_km"),
     durationMin: asNumber(route.duration_min, "route.duration_min"),
     durationMax: asNumber(route.duration_max, "route.duration_max"),
+    strollerStatus: normalizeStrollerStatus(route.stroller_status),
+    preschoolStatus: normalizePreschoolStatus(route.preschool_status),
     difficulty: asString(route.difficulty, "route.difficulty"),
     accessibilityNote: asString(route.accessibility_note, "route.accessibility_note"),
     safetyNote: asString(route.safety_note, "route.safety_note"),

@@ -24,6 +24,8 @@ import {
   pilotRouteId,
   routes,
 } from "../lib/route-content";
+import { normalizePreschoolStatus, normalizeStrollerStatus } from "../lib/route-suitability";
+import { RouteSuitabilityBadges } from "./route-suitability-badges";
 
 type View = "discover" | "detail" | "library" | "game" | "finish" | "activity" | "profile" | "admin" | "partners" | "contact";
 type Modal = "login" | "checkout" | null;
@@ -77,6 +79,10 @@ const staticRouteSummaries: RouteSummary[] = routes.map((route) => ({
   price: route.price,
   distance: route.distance,
   duration: route.duration,
+  durationMinMinutes: route.durationMinMinutes,
+  durationMaxMinutes: route.durationMaxMinutes,
+  strollerStatus: route.strollerStatus,
+  preschoolStatus: route.preschoolStatus,
   difficulty: route.difficulty,
   checkpoints: route.checkpoints,
   status: route.status,
@@ -197,13 +203,14 @@ export default function Home() {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
     let active = true;
-    supabase.from("routes").select("id,district,title,tagline,price_czk,distance_km,duration_minutes,difficulty,checkpoint_count,status,accent,map_x,map_y,available_text").then(({ data }) => {
+    supabase.from("routes").select("id,district,title,tagline,price_czk,distance_km,duration_minutes,duration_min_minutes,duration_max_minutes,stroller_status,preschool_status,difficulty,checkpoint_count,status,accent,map_x,map_y,available_text").then(({ data }) => {
       if (!active || !data) return;
       const byId = new Map(data.map((item) => [item.id as string, item]));
       const nextRoutes = staticRouteSummaries.map((route) => {
         const live = byId.get(route.id);
         if (!live) return route;
-        const duration = Number(live.duration_minutes);
+        const durationMin = Number(live.duration_min_minutes);
+        const durationMax = Number(live.duration_max_minutes);
         return {
           ...route,
           district: String(live.district),
@@ -211,7 +218,13 @@ export default function Home() {
           tagline: String(live.tagline),
           price: Number(live.price_czk),
           distance: Number(live.distance_km),
-          duration: Number.isFinite(duration) ? `${duration} min` : route.duration,
+          duration: Number.isFinite(durationMin) && Number.isFinite(durationMax)
+            ? `${durationMin === durationMax ? durationMin : `${durationMin}–${durationMax}`} min`
+            : route.duration,
+          durationMinMinutes: Number.isFinite(durationMin) ? durationMin : route.durationMinMinutes,
+          durationMaxMinutes: Number.isFinite(durationMax) ? durationMax : route.durationMaxMinutes,
+          strollerStatus: normalizeStrollerStatus(live.stroller_status),
+          preschoolStatus: normalizePreschoolStatus(live.preschool_status),
           difficulty: String(live.difficulty),
           checkpoints: Number(live.checkpoint_count),
           status: live.status as RouteSummary["status"],
@@ -312,6 +325,7 @@ export default function Home() {
     : baseActivities;
   const accountName = auth.profile?.username || auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Přihlásit";
   const accountInitials = accountName.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
+  const pilotRouteSummary = catalogRoutes.find((route) => route.id === demoRoute.id) ?? staticRouteSummaries[0];
 
   function navigate(next: View) {
     setView(next);
@@ -520,7 +534,7 @@ export default function Home() {
 
       <main>
         {view === "discover" && <Discover routesForSale={catalogRoutes} onDetail={() => navigate("detail")} onBuy={openPurchase} />}
-        {view === "detail" && <RouteDetail price={catalogRoutes.find((route) => route.id === demoRoute.id)?.price ?? demoRoute.price} owned={ownsPilotRoute} onBack={() => navigate("discover")} onBuy={() => openPurchase("route")} onStart={startGame} />}
+        {view === "detail" && <RouteDetail route={pilotRouteSummary} owned={ownsPilotRoute} onBack={() => navigate("discover")} onBuy={() => openPurchase("route")} onStart={startGame} />}
         {view === "library" && <Library owned={ownsPilotRoute} progress={displayProgress} totalCheckpoints={totalCheckpoints} notice={gameMessage} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={() => navigate("detail")} />}
         {view === "game" && activeCheckpoint && (
           <Game
@@ -592,12 +606,22 @@ function BottomButton({ icon, label, active, onClick }: { icon: string; label: s
 }
 
 function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSummary[]; onDetail: () => void; onBuy: (item: "route" | "bundle", route?: RouteSummary) => void }) {
+  const [routeFilter, setRouteFilter] = useState("all");
   const bundleListPrice = bundle.routeIds.reduce(
     (total, routeId) => total + (routesForSale.find((route) => route.id === routeId)?.price ?? 0),
     0,
   );
   const bundleSavings = bundleListPrice - bundle.price;
   const bundleReady = bundle.routeIds.every((routeId) => routesForSale.find((route) => route.id === routeId)?.status === "active");
+  const activeRouteCount = routesForSale.filter((route) => route.status === "active").length;
+  const upcomingRouteCount = routesForSale.filter((route) => route.status === "coming").length;
+  const seasonalRouteCount = routesForSale.filter((route) => route.status === "seasonal").length;
+  const districtFilters = Array.from(new Set(routesForSale.filter((route) => route.status !== "seasonal").map((route) => route.district)));
+  const filteredRoutes = routeFilter === "all"
+    ? routesForSale
+    : routeFilter === "seasonal"
+      ? routesForSale.filter((route) => route.status === "seasonal")
+      : routesForSale.filter((route) => route.district === routeFilter);
 
   return (
     <>
@@ -633,19 +657,25 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
       <section className="city-bar section-wrap">
         <div><span className="section-label">Vyber město</span><h2>Kde budeš pátrat?</h2></div>
         <div className="city-pills">
-          {cities.map((city) => <button key={city.id} className={city.active ? "active" : ""} disabled={!city.active}><span>{city.name}</span><small>{city.active ? `${routesForSale.filter((route) => route.status === "active").length} aktivní · ${routesForSale.filter((route) => route.status === "coming").length} připravujeme` : "později"}</small></button>)}
+          {cities.map((city) => <button key={city.id} className={city.active ? "active" : ""} disabled={!city.active}><span>{city.name}</span><small>{city.active ? `${routesForSale.length} tras · ${activeRouteCount} aktivní` : "později"}</small></button>)}
         </div>
       </section>
 
-      <CityRouteMap routes={routesForSale} onBuy={(route) => onBuy("route", route)} />
+      <div className="route-filters section-wrap" aria-label="Filtrovat trasy">
+        <button className={routeFilter === "all" ? "active" : ""} aria-pressed={routeFilter === "all"} onClick={() => setRouteFilter("all")}>Všechny</button>
+        {districtFilters.map((district) => <button key={district} className={routeFilter === district ? "active" : ""} aria-pressed={routeFilter === district} onClick={() => setRouteFilter(district)}>{district}</button>)}
+        <button className={routeFilter === "seasonal" ? "active" : ""} aria-pressed={routeFilter === "seasonal"} onClick={() => setRouteFilter("seasonal")}>Vánoční a sezónní</button>
+      </div>
+
+      <CityRouteMap routes={filteredRoutes} onBuy={(route) => onBuy("route", route)} />
 
       <section className="routes-section section-wrap">
         <div className="section-heading">
           <div><span className="section-label">Brno · aktuálně</span><h2>Vyber si svou výpravu</h2></div>
-          <span className="route-count">1 aktivní · 2 připravujeme</span>
+          <span className="route-count">{activeRouteCount} aktivní · {upcomingRouteCount} připravujeme · {seasonalRouteCount} sezónní</span>
         </div>
         <div className="route-grid">
-          {routesForSale.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={onDetail} />)}
+          {filteredRoutes.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={onDetail} />)}
         </div>
       </section>
 
@@ -684,6 +714,7 @@ function RouteCard({ route, index, onDetail }: { route: RouteSummary; index: num
         <span className="district">BRNO · {route.district.toUpperCase()}</span>
         <h3>{route.title}</h3>
         <p>{route.tagline}</p>
+        <RouteSuitabilityBadges strollerStatus={route.strollerStatus} preschoolStatus={route.preschoolStatus} durationMaxMinutes={route.durationMaxMinutes} />
         <div className="route-stats"><span><small>Vzdálenost</small><b>{route.distance} km</b></span><span><small>Čas</small><b>{route.duration}</b></span><span><small>Obtížnost</small><b>{route.difficulty}</b></span></div>
         <div className="route-card-footer"><strong>{active ? `${route.price} Kč` : route.status === "seasonal" ? route.available : "Již brzy"}</strong><button disabled={!active} onClick={onDetail} aria-label={`Detail trasy ${route.title}`}>{active ? "Prozkoumat →" : "Upozornit mě"}</button></div>
       </div>
@@ -691,7 +722,7 @@ function RouteCard({ route, index, onDetail }: { route: RouteSummary; index: num
   );
 }
 
-function RouteDetail({ price, owned, onBack, onBuy, onStart }: { price: number; owned: boolean; onBack: () => void; onBuy: () => void; onStart: () => void | Promise<void> }) {
+function RouteDetail({ route, owned, onBack, onBuy, onStart }: { route: RouteSummary; owned: boolean; onBack: () => void; onBuy: () => void; onStart: () => void | Promise<void> }) {
   return (
     <section className="detail-page">
       <div className="detail-hero">
@@ -701,7 +732,8 @@ function RouteDetail({ price, owned, onBack, onBuy, onStart }: { price: number; 
             <span className="eyebrow light"><span /> BRNO · KRÁLOVO POLE</span>
             <h1>Stopy<br /><em>proměny</em></h1>
             <p>Poskládej pět ztracených listů kroniky a odhal, jak se z vesnice za hradbami stala sebevědomá městská čtvrť.</p>
-            <div className="detail-tags"><span>4,1 km</span><span>90–120 min</span><span>5 checkpointů</span><span>Střední</span></div>
+            <div className="detail-tags"><span>{route.distance} km</span><span>{route.duration}</span><span>{route.checkpoints} checkpointů</span><span>{route.difficulty}</span></div>
+            <RouteSuitabilityBadges strollerStatus={route.strollerStatus} preschoolStatus={route.preschoolStatus} durationMaxMinutes={route.durationMaxMinutes} />
           </div>
           <div className="detail-map"><div className="map-path" />{routePreviewStops.map((cp) => <span key={cp.id} style={{ left: `${cp.map.x}%`, top: `${cp.map.y}%` }}>{cp.order === 1 ? "1" : "?"}</span>)}<b>KRÁLOVO<br />POLE</b></div>
         </div>
@@ -713,7 +745,7 @@ function RouteDetail({ price, owned, onBack, onBuy, onStart }: { price: number; 
           <div className="checkpoint-preview">{routePreviewStops.map((cp, index) => <div key={cp.id}><span>{index === 0 ? "⌖" : "?"}</span><div><b>{index === 0 ? cp.title : `Stopa ${index + 1} je skrytá`}</b><small>{index === 0 ? "Start výpravy" : "Odemkne se během hry"}</small></div></div>)}</div>
         </div>
         <aside className="purchase-card">
-          <div className="purchase-top"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{owned ? "Zakoupeno" : `${price} Kč`}</strong><small>Jednorázově · bez předplatného</small></div>
+          <div className="purchase-top"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{owned ? "Zakoupeno" : `${route.price} Kč`}</strong><small>Jednorázově · bez předplatného</small></div>
           <button className="button primary full" onClick={owned ? onStart : onBuy}>{owned ? "Vyrazit na trasu →" : "Koupit trasu →"}</button>
           <ul><li>✓ Hraješ vlastním tempem</li><li>✓ 2 úrovně nápovědy</li><li>✓ Přístup bez časového omezení</li><li>✓ Odznak Král KrPole</li></ul>
           <div className="gear"><b>Co s sebou?</b><p>Nabitý telefon, pohodlné boty, tužku a chuť dívat se kolem sebe.</p></div>

@@ -1,3 +1,6 @@
+import type { RoutePreschoolStatus, RouteStrollerStatus } from "./route-suitability";
+import { northernAndSeasonalRoutes } from "./route-portfolio";
+
 export type RouteAvailability = "active" | "coming" | "seasonal";
 export type RouteLifecycle = "draft" | "testing" | "active" | "maintenance" | "retired";
 export type PuzzleType = "online" | "physical" | "hybrid";
@@ -24,6 +27,10 @@ export type RouteProduct = {
   price: number;
   distance: number;
   duration: string;
+  durationMinMinutes: number;
+  durationMaxMinutes: number;
+  strollerStatus: RouteStrollerStatus;
+  preschoolStatus: RoutePreschoolStatus;
   difficulty: string;
   checkpoints: number;
   status: RouteAvailability;
@@ -63,6 +70,10 @@ export const routes: RouteProduct[] = [
     price: 449,
     distance: 4.1,
     duration: "90–120 min",
+    durationMinMinutes: 90,
+    durationMaxMinutes: 120,
+    strollerStatus: "unknown",
+    preschoolStatus: "unknown",
     difficulty: "Střední",
     checkpoints: 5,
     status: "active",
@@ -92,6 +103,10 @@ export const routes: RouteProduct[] = [
     price: 449,
     distance: 3.6,
     duration: "80–100 min",
+    durationMinMinutes: 80,
+    durationMaxMinutes: 100,
+    strollerStatus: "unknown",
+    preschoolStatus: "unknown",
     difficulty: "Lehká",
     checkpoints: 0,
     status: "coming",
@@ -119,6 +134,10 @@ export const routes: RouteProduct[] = [
     price: 449,
     distance: 4.8,
     duration: "100–130 min",
+    durationMinMinutes: 100,
+    durationMaxMinutes: 130,
+    strollerStatus: "unknown",
+    preschoolStatus: "unknown",
     difficulty: "Střední",
     checkpoints: 0,
     status: "coming",
@@ -137,6 +156,7 @@ export const routes: RouteProduct[] = [
     mapX: 35,
     mapY: 39,
   },
+  ...northernAndSeasonalRoutes,
 ];
 
 export const cities: City[] = [

@@ -6,8 +6,10 @@ import QRCode from "qrcode";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "../lib/supabase/client";
+import type { RoutePreschoolStatus, RouteStrollerStatus } from "../lib/route-suitability";
 import { DiscountAdmin } from "./discount-admin";
 import { RouteCms } from "./route-cms";
+import { RouteSuitabilityBadges } from "./route-suitability-badges";
 
 export type UserRole = "user" | "route_manager" | "superadmin";
 
@@ -31,6 +33,10 @@ export type RouteSummary = {
   price: number;
   distance: number;
   duration: string;
+  durationMinMinutes: number;
+  durationMaxMinutes: number;
+  strollerStatus: RouteStrollerStatus;
+  preschoolStatus: RoutePreschoolStatus;
   difficulty: string;
   checkpoints: number;
   status: "active" | "coming" | "seasonal";
@@ -278,18 +284,36 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
 export function CityRouteMap({ routes, onBuy }: { routes: RouteSummary[]; onBuy: (route: RouteSummary) => void }) {
   const [selectedId, setSelectedId] = useState(routes[0]?.id ?? "");
   const selected = routes.find((route) => route.id === selectedId) ?? routes[0];
+  const districtGroups = useMemo(() => {
+    const grouped = new Map<string, RouteSummary[]>();
+    routes.forEach((route) => grouped.set(route.district, [...(grouped.get(route.district) ?? []), route]));
+    return [...grouped.entries()].map(([district, districtRoutes]) => ({
+      district,
+      routes: districtRoutes,
+      mapX: districtRoutes.reduce((sum, route) => sum + route.mapX, 0) / districtRoutes.length,
+      mapY: districtRoutes.reduce((sum, route) => sum + route.mapY, 0) / districtRoutes.length,
+    }));
+  }, [routes]);
   if (!selected) return null;
+  const selectedDistrictRoutes = districtGroups.find((group) => group.district === selected.district)?.routes ?? [selected];
 
   return (
     <section className="city-route-map section-wrap" aria-label="Interaktivní mapa tras v Brně">
       <div className="city-map-canvas">
         <span className="map-river river-one" /><span className="map-river river-two" />
         <b className="city-map-title">BRNO</b>
-        {routes.map((route) => <button key={route.id} className={`district-pin ${selected.id === route.id ? "selected" : ""}`} style={{ left: `${route.mapX}%`, top: `${route.mapY}%` }} onClick={() => setSelectedId(route.id)} aria-label={`${route.district}: ${route.title}`}><span>{route.status === "active" ? "⌖" : route.status === "seasonal" ? "✦" : "·"}</span><small>{route.district.replace(" · Prygl", "")}</small></button>)}
+        {districtGroups.map((group) => {
+          const isSelected = group.district === selected.district;
+          const groupHasActiveRoute = group.routes.some((route) => route.status === "active");
+          const groupIsSeasonal = group.routes.every((route) => route.status === "seasonal");
+          return <button key={group.district} className={`district-pin ${isSelected ? "selected" : ""}`} style={{ left: `${group.mapX}%`, top: `${group.mapY}%` }} onClick={() => setSelectedId(group.routes[0].id)} aria-label={`${group.district}: ${group.routes.length} ${group.routes.length === 1 ? "trasa" : "trasy"}`}><span>{groupHasActiveRoute ? "⌖" : groupIsSeasonal ? "✦" : "·"}</span><small>{group.district.replace(" · Prygl", "")}{group.routes.length > 1 && <b>{group.routes.length}</b>}</small></button>;
+        })}
       </div>
       <aside className="map-route-detail">
         <span className="section-label">BRNO · {selected.district}</span>
         <h2>{selected.title}</h2><p>{selected.tagline}</p>
+        {selectedDistrictRoutes.length > 1 && <div className="map-route-variants" aria-label={`Trasy v lokalitě ${selected.district}`}>{selectedDistrictRoutes.map((route) => <button key={route.id} className={route.id === selected.id ? "active" : ""} onClick={() => setSelectedId(route.id)} aria-pressed={route.id === selected.id}>{route.title}</button>)}</div>}
+        <RouteSuitabilityBadges strollerStatus={selected.strollerStatus} preschoolStatus={selected.preschoolStatus} durationMaxMinutes={selected.durationMaxMinutes} compact />
         <div className="map-route-stats"><span><small>Délka</small><b>{selected.distance} km</b></span><span><small>Čas</small><b>{selected.duration}</b></span><span><small>Licence</small><b>Tým 1–5</b></span></div>
         <div className="map-price"><div><small>Za celý tým</small><strong>{selected.price} Kč</strong></div><button className="button primary" onClick={() => onBuy(selected)} disabled={selected.status !== "active"}>{selected.status === "active" ? "Koupit pro tým →" : "Připravujeme"}</button></div>
         <p className="map-availability">{selected.status === "active" ? "Připraveno ke hraní" : `Dostupné po terénním ověření · ${selected.available ?? "připravujeme"}`}</p>
