@@ -1,0 +1,138 @@
+{
+  "contract_version": 1,
+  "audited_at": "2026-11-06",
+  "fresh_install_ready": false,
+  "first_tracked_migration": "20260811104721_reserve_gallus_superadmin_username.sql",
+  "missing_baseline": {
+    "schemas": [
+      "private"
+    ],
+    "enum_types": [
+      {
+        "name": "public.order_status",
+        "labels": [
+          "pending",
+          "paid",
+          "rejected",
+          "cancelled"
+        ]
+      },
+      {
+        "name": "public.user_role",
+        "labels": [
+          "user",
+          "route_manager",
+          "superadmin"
+        ]
+      }
+    ],
+    "tables": [
+      "public.contact_messages",
+      "public.email_templates",
+      "public.level_definitions",
+      "public.orders",
+      "public.partner_leads",
+      "public.profiles",
+      "public.route_managers",
+      "public.routes",
+      "public.user_route_access",
+      "public.xp_events"
+    ],
+    "functions": [
+      "private.is_route_manager(text)",
+      "private.is_superadmin()",
+      "private.sync_profile_xp()"
+    ],
+    "triggers": [
+      {
+        "name": "on_auth_user_created",
+        "table": "auth.users",
+        "function": "private.handle_new_user()"
+      },
+      {
+        "name": "on_xp_event_created",
+        "table": "public.xp_events",
+        "function": "private.sync_profile_xp()"
+      }
+    ],
+    "non_constraint_indexes": [
+      "contact_messages_user_id_idx",
+      "email_templates_updated_by_idx",
+      "orders_approved_by_idx",
+      "orders_user_id_idx",
+      "route_managers_user_id_idx",
+      "user_route_access_order_id_idx",
+      "user_route_access_route_id_idx",
+      "xp_events_route_id_idx",
+      "xp_events_user_id_idx"
+    ],
+    "rls_policies": [
+      "access_admin_delete",
+      "access_admin_insert",
+      "access_admin_update",
+      "access_read_own_or_admin",
+      "contact_admin_read",
+      "contact_admin_update",
+      "contact_insert",
+      "email_templates_admin",
+      "managers_admin_delete",
+      "managers_admin_insert",
+      "managers_admin_update",
+      "managers_read",
+      "orders_read_own_or_admin",
+      "partner_admin_read",
+      "partner_admin_update",
+      "partner_insert",
+      "profiles_read_self",
+      "profiles_update_self",
+      "public_levels_read",
+      "public_routes_read",
+      "xp_manager_insert",
+      "xp_read_own_or_admin"
+    ],
+    "reference_data": {
+      "level_definitions": {
+        "expected_rows": 10,
+        "levels": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      },
+      "email_templates": {
+        "expected_rows": 5,
+        "ids": [
+          "contact_confirmation",
+          "password_reset",
+          "payment_approved",
+          "payment_received",
+          "registration"
+        ]
+      }
+    }
+  },
+  "intentionally_deferred": {
+    "migration": "supabase/deferred/20261102213018_add_referrals_and_credits.sql",
+    "tables": [
+      "public.commerce_package_routes",
+      "public.commerce_packages",
+      "public.credit_ledger",
+      "public.credit_reservations",
+      "public.referral_codes",
+      "public.referral_programs",
+      "public.referrals"
+    ]
+  },
+  "tracked_later": {
+    "storage_buckets": [
+      "route-media"
+    ]
+  }
+}

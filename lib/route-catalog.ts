@@ -6,6 +6,7 @@ import {
 } from "./route-suitability";
 
 export type PublicRouteStatus = "active" | "coming" | "seasonal";
+export type CommerceCatalogStatus = "loading" | "verified" | "unavailable";
 
 export type PublicRouteSummary = {
   id: string;
@@ -39,6 +40,29 @@ const routeAccents = new Set(["orange", "teal", "blue", "red"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A static catalogue is useful as a readable offline preview, but it must not
+ * authorize checkout. Before commerce is enabled, every released route must
+ * be present in the live catalogue with an explicit server-owned price and a
+ * valid editorial state.
+ */
+export function isCommerceCatalogVerified(rows: unknown, releasedRouteIds: readonly string[]): boolean {
+  if (!Array.isArray(rows) || releasedRouteIds.length === 0) return false;
+
+  const rowsById = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    if (!isRecord(row) || typeof row.id !== "string" || !row.id.trim()) continue;
+    rowsById.set(row.id, row);
+  }
+
+  return releasedRouteIds.every((routeId) => {
+    const row = rowsById.get(routeId);
+    if (!row || typeof row.price_czk !== "number" || !Number.isInteger(row.price_czk)) return false;
+    if (row.price_czk <= 0 || row.price_czk > 100_000) return false;
+    return typeof row.status === "string" && routeStatuses.has(row.status as PublicRouteStatus);
+  });
 }
 
 function nonEmptyString(value: unknown, fallback: string) {

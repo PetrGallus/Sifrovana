@@ -82,6 +82,24 @@ NEXT_PUBLIC_GOOGLE_MAPS_EMBED_KEY=
 
 Proměnné s prefixem `NEXT_PUBLIC_` musí být přítomné už při `vinext build`; samotné nastavení runtime proměnných v Sites nepřepíše hotové klientské chunky. Produkční release proto balí lokální build vytvořený se stejnou revizí veřejných Sites proměnných. Po nasazení se vždy ověřuje živé načtení katalogu ze Supabase, ne pouze HTTP dostupnost stránky.
 
+Release build se nesmí vytvářet obyčejným `pnpm build`. Po načtení aktuálních veřejných hodnot ze Sites spusť:
+
+```bash
+pnpm release:prepare
+```
+
+Příkaz sestaví aplikaci, ověří, že se URL i publishable key propsaly přímo do `dist/client`, spustí kontraktní testy a vytvoří `outputs/site-package.tar.gz`. Archiv obsahuje výhradně ověřený `dist/` s odpovídajícím Sites manifestem; symlinky, soubory připomínající tajnou konfiguraci a výstup mimo ignorované `outputs/` jsou odmítnuty. Chybějící nebo starý klientský build skončí chybou ještě před publikací a hodnotu publishable key kontrola nikdy nevypisuje.
+
+Samostatné `pnpm release:verify` pouze ověří již existující build a `pnpm release:package` jej znovu bezpečně zabalí. Oba kroky jsou fail-closed a vyžadují stejné veřejné build-time proměnné jako samotné sestavení.
+
+Po nasazení ověř stejnou konfiguraci přímo v živých, obsahově verzovaných chuncech:
+
+```bash
+pnpm release:verify-live --url https://sifrovana-mestska-hra.galluspeginpetr.chatgpt.site
+```
+
+Verifier používá cache-buster, sleduje pouze stejno-originové `/_next/static/` JavaScript assety a potvrzuje očekávanou Supabase URL. Publishable key nestahuje z konfigurace ani jej nevypisuje.
+
 ## Struktura
 
 - `app/` – uživatelské rozhraní a společný herní engine;
@@ -91,6 +109,8 @@ Proměnné s prefixem `NEXT_PUBLIC_` musí být přítomné už při `vinext bui
 - `supabase/deferred/` – připravené, ale nenasazené funkce pro některou další verzi;
 - `docs/PRODUCT_CONSTITUTION.md` – produktové mantinely, ekonomika a expanzní brány;
 - `docs/architecture/map-foundation.md` – zdroje, licence a rozšiřování mapového základu;
+- `docs/architecture/supabase-baseline.md` – audit chybějícího databázového baseline a bezpečný plán nápravy;
+- `docs/operations/production-status.md` – aktuální rozdíl mezi repozitářem a produkcí a release handoff;
 - `docs/field/physical-layer-plan.md` – nízkoúdržbový návrh fyzických prvků pro jednotlivé trasy;
 - `tests/` – server-render a kontrola základních produktových kontraktů.
 

@@ -25,12 +25,14 @@ test("přímé herní URL se po ověření relace nepřepne na nepovolené dokon
 });
 
 test("změna účtu odstraní citlivou herní relaci z paměti a reference jsou oddělené podle uživatele", async () => {
-  const [page, hook] = await Promise.all([
+  const [page, hook, ownership] = await Promise.all([
     readFile(new URL("app/page.tsx", root), "utf8"),
     readFile(new URL("app/use-published-game.ts", root), "utf8"),
+    readFile(new URL("lib/route-ownership.ts", root), "utf8"),
   ]);
-  assert.match(page, /routeOwnership\?\.userId === currentUserId \? routeOwnership\.routeIds : \[\]/);
-  assert.match(page, /setRouteOwnership\(\{ userId, routeIds:/);
+  assert.match(page, /resolveCurrentRouteOwnership\(routeOwnership, currentUserId, isSuperadmin\)/);
+  assert.match(page, /setRouteOwnership\(\{ userId, status: "verified", routeIds \}\)/);
+  assert.match(ownership, /state\.userId !== currentUserId[\s\S]{0,100}status: "loading", routeIds: \[\]/);
   assert.match(page, /usePublishedGame\(auth\.user\?\.id \?\? null\)/);
   assert.match(hook, /references\[userId\] = \{ [\s\S]{0,100}\[session\.routeId\]: session\.id \}/);
   assert.match(hook, /if \(previousUserId\.current === userId\) return;[\s\S]{0,160}setSession\(null\)/);

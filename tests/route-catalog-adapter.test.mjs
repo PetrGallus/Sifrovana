@@ -18,7 +18,7 @@ async function importTypeScriptModule() {
   return import(`data:text/javascript;base64,${Buffer.from(adapterJavaScript).toString("base64")}`);
 }
 
-const { mergePublicCatalogRoutes, PUBLIC_ROUTE_CATALOG_SELECT } = await importTypeScriptModule();
+const { isCommerceCatalogVerified, mergePublicCatalogRoutes, PUBLIC_ROUTE_CATALOG_SELECT } = await importTypeScriptModule();
 
 const fallback = {
   id: "brno-test",
@@ -128,4 +128,20 @@ test("neplatná nebo neexistující kalendářní data se do katalogu nepropíš
   const [route] = mergePublicCatalogRoutes([fallback], [{ id: fallback.id, available_from: "2026-02-30", available_to: "javascript:alert(1)" }]);
   assert.equal(route.availableFrom, undefined);
   assert.equal(route.availableTo, undefined);
+});
+
+test("checkout se odemkne jen z kompletního živého katalogu", () => {
+  const released = ["brno-one", "brno-two"];
+  const validRows = [
+    { id: "brno-one", price_czk: 250, status: "active" },
+    { id: "brno-two", price_czk: 300, status: "seasonal" },
+  ];
+
+  assert.equal(isCommerceCatalogVerified(validRows, released), true);
+  assert.equal(isCommerceCatalogVerified(validRows.slice(0, 1), released), false);
+  assert.equal(isCommerceCatalogVerified([{ id: "brno-one", price_czk: "250", status: "active" }], ["brno-one"]), false);
+  assert.equal(isCommerceCatalogVerified([{ id: "brno-one", price_czk: 0, status: "active" }], ["brno-one"]), false);
+  assert.equal(isCommerceCatalogVerified([{ id: "brno-one", price_czk: 250, status: "draft" }], ["brno-one"]), false);
+  assert.equal(isCommerceCatalogVerified(null, ["brno-one"]), false);
+  assert.equal(isCommerceCatalogVerified(validRows, []), false);
 });

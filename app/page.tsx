@@ -13,7 +13,7 @@ import {
   type RouteSummary,
   useSifrovanaAuth,
 } from "./product-sections";
-import { getSupabaseBrowserClient } from "../lib/supabase/client";
+import { getSupabaseBrowserClient, isSupabaseConfigured } from "../lib/supabase/client";
 import { CheckpointMap } from "./checkpoint-map";
 import { usePublishedGame } from "./use-published-game";
 import type { PublishedGameCheckpoint, PublishedGameSession } from "../lib/supabase/published-game";
@@ -25,11 +25,21 @@ import {
   pilotRouteId,
   routes,
 } from "../lib/route-content";
-import { mergePublicCatalogRoutes, PUBLIC_ROUTE_CATALOG_SELECT } from "../lib/route-catalog";
+import {
+  isCommerceCatalogVerified,
+  mergePublicCatalogRoutes,
+  PUBLIC_ROUTE_CATALOG_SELECT,
+  type CommerceCatalogStatus,
+} from "../lib/route-catalog";
 import { RouteSuitabilityBadges } from "./route-suitability-badges";
 import { BrnoIllustratedMap } from "./brno-illustrated-map";
 import { canPurchasePublishedRoute, canStartPublishedGame } from "../lib/route-playability";
 import { buildAppSearch, parseAppLocation, type AppView } from "../lib/app-location";
+import {
+  resolveCurrentRouteOwnership,
+  type RouteOwnershipState,
+  type RouteOwnershipStatus,
+} from "../lib/route-ownership";
 
 const AdminCenter = lazy(() => import("./admin-center").then((module) => ({ default: module.AdminCenter })));
 
@@ -40,6 +50,7 @@ type Badge = { id: string; name: string; detail: string; icon: string; earned: b
 type StoredState = {
   progress: RouteProgress;
   activityAdded: boolean;
+  activityUserId: string | null;
 };
 
 type PublishedResult = {
@@ -113,6 +124,7 @@ const badges: Badge[] = [
 const initialState: StoredState = {
   progress: { current: 0, solved: [], hintsUsed: 0, completed: false },
   activityAdded: false,
+  activityUserId: null,
 };
 
 const storageKey = "sifrovana-demo-v1";
@@ -157,9 +169,15 @@ export default function Home() {
   const [proofMode, setProofMode] = useState<"photo" | "signature" | "skip">("photo");
   const [checkoutItem, setCheckoutItem] = useState<"route" | "bundle">("route");
   const [catalogRoutes, setCatalogRoutes] = useState<RouteSummary[]>(staticRouteSummaries);
+  const [catalogStatus, setCatalogStatus] = useState<CommerceCatalogStatus>(() => isSupabaseConfigured() ? "loading" : "unavailable");
+  const [catalogRefreshKey, setCatalogRefreshKey] = useState(0);
   const [selectedRouteId, setSelectedRouteId] = useState(pilotRouteId);
   const [resumeCheckout, setResumeCheckout] = useState(false);
-  const [routeOwnership, setRouteOwnership] = useState<{ userId: string; routeIds: string[] } | null>(null);
+  const [routeOwnership, setRouteOwnership] = useState<RouteOwnershipState>({
+    userId: null,
+    status: "unavailable",
+    routeIds: [],
+  });
   const [publishedResult, setPublishedResult] = useState<PublishedResult | null>(null);
   const [gameMessage, setGameMessage] = useState("");
   const [resumeCheckedKey, setResumeCheckedKey] = useState<string | null>(null);
@@ -170,8 +188,39 @@ export default function Home() {
   const drawing = useRef(false);
   const photoUrlRef = useRef<string | null>(null);
   const resumeAttemptedUser = useRef<string | null>(null);
+  const ownershipRequest = useRef(0);
   const currentUserId = auth.user?.id ?? null;
-  const ownedRouteIds = routeOwnership?.userId === currentUserId ? routeOwnership.routeIds : [];
+  const isSuperadmin = auth.profile?.role === "superadmin";
+  const currentOwnership = resolveCurrentRouteOwnership(routeOwnership, currentUserId, isSuperadmin);
+  const ownedRouteIds = currentOwnership.routeIds;
+
+  const refreshRouteOwnership = useCallback(async () => {
+    const requestId = ++ownershipRequest.current;
+    const userId = currentUserId;
+    const supabase = getSupabaseBrowserClient();
+    if (!userId || !supabase) {
+      setRouteOwnership({ userId, status: "unavailable", routeIds: [] });
+      return;
+    }
+
+    setRouteOwnership({ userId, status: "loading", routeIds: [] });
+    try {
+      const { data, error } = await supabase
+        .from("user_route_access")
+        .select("route_id")
+        .eq("user_id", userId);
+      if (requestId !== ownershipRequest.current) return;
+      if (error) throw error;
+      const routeIds = [...new Set((data ?? []).flatMap((item) => (
+        typeof item.route_id === "string" ? [item.route_id] : []
+      )))];
+      setRouteOwnership({ userId, status: "verified", routeIds });
+    } catch {
+      if (requestId === ownershipRequest.current) {
+        setRouteOwnership({ userId, status: "unavailable", routeIds: [] });
+      }
+    }
+  }, [currentUserId]);
 
   useEffect(() => {
     const applyLocation = (moveFocus = false) => {
@@ -225,6 +274,9 @@ export default function Home() {
           setState((current) => ({
             ...current,
             activityAdded: savedState.activityAdded === true,
+            activityUserId: typeof savedState.activityUserId === "string"
+              ? savedState.activityUserId
+              : null,
           }));
         } catch {
           window.localStorage.removeItem(storageKey);
@@ -239,10 +291,13 @@ export default function Home() {
     if (hydrated) {
       window.localStorage.setItem(
         storageKey,
-        JSON.stringify({ activityAdded: state.activityAdded }),
+        JSON.stringify({
+          activityAdded: state.activityAdded,
+          activityUserId: state.activityUserId,
+        }),
       );
     }
-  }, [state.activityAdded, hydrated]);
+  }, [state.activityAdded, state.activityUserId, hydrated]);
 
   useEffect(() => () => {
     if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
@@ -252,25 +307,52 @@ export default function Home() {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
     let active = true;
-    supabase.from("routes").select(PUBLIC_ROUTE_CATALOG_SELECT).then(({ data }) => {
-      if (!active || !data) return;
-      const nextRoutes = mergePublicCatalogRoutes(staticRouteSummaries, data);
-      setCatalogRoutes(nextRoutes);
-      setSelectedRouteId((current) => nextRoutes.some((route) => route.id === current) ? current : (nextRoutes[0]?.id ?? pilotRouteId));
-    });
-    return () => { active = false; };
-  }, []);
+    const timeout = window.setTimeout(() => {
+      if (active) setCatalogStatus("unavailable");
+    }, 10_000);
+    void (async () => {
+      try {
+        const { data, error } = await supabase.from("routes").select(PUBLIC_ROUTE_CATALOG_SELECT);
+        if (!active) return;
+        if (error || !isCommerceCatalogVerified(data, commerciallyReleasedRouteIds)) {
+          setCatalogStatus("unavailable");
+          return;
+        }
+        const nextRoutes = mergePublicCatalogRoutes(staticRouteSummaries, data);
+        setCatalogRoutes(nextRoutes);
+        setSelectedRouteId((current) => nextRoutes.some((route) => route.id === current) ? current : (nextRoutes[0]?.id ?? pilotRouteId));
+        setCatalogStatus("verified");
+      } catch {
+        if (active) setCatalogStatus("unavailable");
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    })();
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [catalogRefreshKey]);
 
   useEffect(() => {
-    const supabase = getSupabaseBrowserClient();
-    if (!supabase || !auth.user) return;
-    const userId = auth.user.id;
-    let active = true;
-    supabase.from("user_route_access").select("route_id").eq("user_id", userId).then(({ data }) => {
-      if (active) setRouteOwnership({ userId, routeIds: (data ?? []).map((item) => item.route_id as string) });
-    });
-    return () => { active = false; };
-  }, [auth.user]);
+    const timer = window.setTimeout(() => { void refreshRouteOwnership(); }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      ownershipRequest.current += 1;
+    };
+  }, [refreshRouteOwnership]);
+
+  useEffect(() => {
+    if (
+      !resumeCheckout
+      || !auth.user
+      || modal !== null
+      || catalogStatus !== "verified"
+      || (currentOwnership.checkRequired && currentOwnership.status !== "verified")
+    ) return;
+    const timer = window.setTimeout(() => setModal("checkout"), 0);
+    return () => window.clearTimeout(timer);
+  }, [auth.user, catalogStatus, currentOwnership.checkRequired, currentOwnership.status, modal, resumeCheckout]);
 
   const resumeLastPublishedGame = publishedGame.resumeLast;
   const clearPublishedGameError = publishedGame.clearError;
@@ -340,11 +422,13 @@ export default function Home() {
     .filter((checkpoint) => checkpoint.metaToken)
     .map((checkpoint) => ({ position: checkpoint.position, token: checkpoint.metaToken as string }))
     .sort((left, right) => left.position - right.position);
-  const completed = Boolean(publishedGame.session?.progress.completedAt)
-    || state.progress.completed
-    || state.activityAdded;
-  const currentGameCompleted = Boolean(publishedGame.session?.progress.completedAt)
-    || state.progress.completed;
+  const hasLocalActivity = Boolean(
+    currentUserId
+    && state.activityAdded
+    && state.activityUserId === currentUserId,
+  );
+  const completed = Boolean(publishedGame.session?.progress.completedAt) || hasLocalActivity;
+  const currentGameCompleted = Boolean(publishedGame.session?.progress.completedAt);
   const displayProgress: RouteProgress = publishedGame.session
     ? {
         current: Math.min(
@@ -355,13 +439,13 @@ export default function Home() {
         hintsUsed: publishedGame.session.progress.hintsUsed,
         completed,
       }
-    : { ...state.progress, completed };
+    : { ...initialState.progress, completed: hasLocalActivity };
   const ownedPlayableRoutes = catalogRoutes.filter((route) => (
     canStartPublishedGame(route, commerciallyReleasedRouteIds)
-    && (auth.profile?.role === "superadmin" || ownedRouteIds.includes(route.id))
+    && (isSuperadmin || ownedRouteIds.includes(route.id))
   ));
   const earnedBadges = badges.map((badge) => (badge.id === "king" && completed ? { ...badge, earned: true } : badge));
-  const activities = state.activityAdded
+  const activities = hasLocalActivity
     ? [{ id: "pilot", title: "Královo Pole: Stopy proměny", date: "Dnes", distance: "4,1 km", time: "1:34" }, ...baseActivities]
     : baseActivities;
   const accountName = auth.profile?.username || auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Přihlásit";
@@ -410,6 +494,14 @@ export default function Home() {
   }
 
   function openPurchase(item: "route" | "bundle" = "route", requestedRoute?: RouteSummary) {
+    if (currentOwnership.checkRequired && currentOwnership.status !== "verified") {
+      setGameMessage(currentOwnership.status === "loading"
+        ? "Nejdřív dokončíme ověření tvých zakoupených tras."
+        : "Zakoupené trasy se nepodařilo bezpečně ověřit. Zkus ověření zopakovat v Moje hry.");
+      navigate("library");
+      return;
+    }
+    if (catalogStatus !== "verified") return;
     const route = requestedRoute ?? catalogRoutes.find((candidate) => canPurchasePublishedRoute(candidate, commerciallyReleasedRouteIds));
     const bundleReady = commerciallyReleasedBundleIds.includes(bundle.id)
       && bundle.routeIds.every((routeId) => canPurchasePublishedRoute(catalogRoutes.find((candidate) => candidate.id === routeId), commerciallyReleasedRouteIds));
@@ -424,7 +516,7 @@ export default function Home() {
   }
 
   function login() {
-    setModal(resumeCheckout ? "checkout" : null);
+    setModal(null);
     if (!resumeCheckout) navigate("profile");
   }
 
@@ -441,7 +533,14 @@ export default function Home() {
       if (requestedRoute) openRouteDetail(requestedRoute);
       return;
     }
-    const ownsRequestedRoute = auth.profile?.role === "superadmin" || ownedRouteIds.includes(requestedRoute.id);
+    if (currentOwnership.checkRequired && currentOwnership.status !== "verified") {
+      setGameMessage(currentOwnership.status === "loading"
+        ? "Ověřujeme, které trasy máš zakoupené. Počkej prosím okamžik."
+        : "Vlastnictví trasy teď nelze bezpečně ověřit. Použij v knihovně tlačítko Zkontrolovat nákupy.");
+      navigate("library");
+      return;
+    }
+    const ownsRequestedRoute = isSuperadmin || ownedRouteIds.includes(requestedRoute.id);
     if (!ownsRequestedRoute) {
       openPurchase("route", requestedRoute);
       return;
@@ -533,7 +632,11 @@ export default function Home() {
     if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
     photoUrlRef.current = null;
     setPhoto(null);
-    setState((current) => ({ ...current, activityAdded: true }));
+    setState((current) => ({
+      ...current,
+      activityAdded: Boolean(currentUserId),
+      activityUserId: currentUserId,
+    }));
     navigate("profile");
   }
 
@@ -586,6 +689,17 @@ export default function Home() {
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
   }
 
+  function retryRouteOwnership() {
+    setGameMessage("");
+    void refreshRouteOwnership();
+  }
+
+  function retryCatalog() {
+    if (!isSupabaseConfigured()) return;
+    setCatalogStatus("loading");
+    setCatalogRefreshKey((current) => current + 1);
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -620,9 +734,9 @@ export default function Home() {
       )}
 
       <main ref={mainRef} id="main-content" tabIndex={-1}>
-        {view === "discover" && <Discover routesForSale={catalogRoutes} onDetail={openRouteDetail} onBuy={openPurchase} />}
-        {view === "detail" && <RouteDetail route={selectedRoute} owned={auth.profile?.role === "superadmin" || ownedRouteIds.includes(selectedRoute.id)} onBack={() => navigate("discover")} onBuy={() => openPurchase("route", selectedRoute)} onStart={() => startGame(selectedRoute.id)} />}
-        {view === "library" && <Library routes={ownedPlayableRoutes} progress={displayProgress} progressRouteId={publishedGame.session?.routeId ?? pilotRouteId} notice={gameMessage} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={openRouteDetail} />}
+        {view === "discover" && <Discover routesForSale={catalogRoutes} catalogStatus={catalogStatus} ownershipStatus={currentOwnership.status} ownershipCheckRequired={currentOwnership.checkRequired} onRefreshCatalog={retryCatalog} onRefreshOwnership={retryRouteOwnership} onDetail={openRouteDetail} onBuy={openPurchase} />}
+        {view === "detail" && <RouteDetail route={selectedRoute} catalogStatus={catalogStatus} ownershipStatus={currentOwnership.status} ownershipCheckRequired={currentOwnership.checkRequired} owned={isSuperadmin || ownedRouteIds.includes(selectedRoute.id)} onBack={() => navigate("discover")} onRefreshCatalog={retryCatalog} onRefreshOwnership={retryRouteOwnership} onBuy={() => openPurchase("route", selectedRoute)} onStart={() => startGame(selectedRoute.id)} />}
+        {view === "library" && <Library routes={ownedPlayableRoutes} ownershipStatus={currentOwnership.status} ownershipCheckRequired={currentOwnership.checkRequired} progress={displayProgress} progressRouteId={publishedGame.session?.routeId ?? pilotRouteId} notice={gameMessage} onRefreshOwnership={retryRouteOwnership} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={openRouteDetail} />}
         {protectedViewPending && <section className="page section-wrap" aria-live="polite"><div className="loading-shell"><span className="loader-mark">Š</span><p>Ověřujeme rozehranou výpravu…</p></div></section>}
         {view === "game" && protectedViewReady && activeCheckpoint && (
           <Game
@@ -650,7 +764,7 @@ export default function Home() {
         {view === "game" && protectedViewReady && publishedGame.session && !activeCheckpoint && <section className="page section-wrap"><div className="empty-state"><span>!</span><h2>Checkpoint se nepodařilo načíst</h2><p>{gameMessage || "Vrať se do knihovny a spusť publikovanou trasu znovu."}</p><button className="button primary" onClick={() => navigate("library")}>Zpět do knihovny</button></div></section>}
         {view === "finish" && protectedViewReady && currentGameCompleted && (
           <Finish
-            hintsUsed={state.progress.hintsUsed}
+            hintsUsed={publishedGame.session?.progress.hintsUsed ?? 0}
             totalCheckpoints={totalCheckpoints}
             proofMode={proofMode}
             setProofMode={setProofMode}
@@ -694,14 +808,29 @@ function BottomButton({ icon, label, active, onClick }: { icon: string; label: s
   return <button className={active ? "active" : ""} onClick={onClick} aria-current={active ? "page" : undefined}><span>{icon}</span><b>{label}</b></button>;
 }
 
-function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSummary[]; onDetail: (route: RouteSummary) => void; onBuy: (item: "route" | "bundle", route?: RouteSummary) => void }) {
+function Discover({ routesForSale, catalogStatus, ownershipStatus, ownershipCheckRequired, onRefreshCatalog, onRefreshOwnership, onDetail, onBuy }: {
+  routesForSale: RouteSummary[];
+  catalogStatus: CommerceCatalogStatus;
+  ownershipStatus: RouteOwnershipStatus;
+  ownershipCheckRequired: boolean;
+  onRefreshCatalog: () => void;
+  onRefreshOwnership: () => void;
+  onDetail: (route: RouteSummary) => void;
+  onBuy: (item: "route" | "bundle", route?: RouteSummary) => void;
+}) {
   const [routeFilter, setRouteFilter] = useState("all");
+  const ownershipBlocked = ownershipCheckRequired && ownershipStatus !== "verified";
+  const purchaseCatalogStatus = catalogStatus === "verified" && ownershipBlocked
+    ? ownershipStatus === "loading" ? "loading" : "unavailable"
+    : catalogStatus;
   const bundleListPrice = bundle.routeIds.reduce(
     (total, routeId) => total + (routesForSale.find((route) => route.id === routeId)?.price ?? 0),
     0,
   );
   const bundleSavings = bundleListPrice - bundle.price;
-  const bundleReady = commerciallyReleasedBundleIds.includes(bundle.id)
+  const bundleReady = catalogStatus === "verified"
+    && !ownershipBlocked
+    && commerciallyReleasedBundleIds.includes(bundle.id)
     && bundle.routeIds.every((routeId) => canPurchasePublishedRoute(routesForSale.find((route) => route.id === routeId), commerciallyReleasedRouteIds));
   const activeRouteCount = routesForSale.filter((route) => canPurchasePublishedRoute(route, commerciallyReleasedRouteIds)).length;
   const upcomingRouteCount = routesForSale.filter((route) => route.status === "coming").length;
@@ -739,6 +868,9 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
         </div>
       </section>
 
+      {catalogStatus !== "verified" && <div className={`catalog-status ${catalogStatus === "unavailable" ? "error" : ""}`} role="status" aria-live="polite"><b>{catalogStatus === "loading" ? "Ověřujeme aktuální ceny…" : "Nákup je dočasně pozastavený"}</b><span>{catalogStatus === "loading" ? "Za okamžik načteme živý katalog." : "Trasy si můžeš prohlížet. Objednávku znovu zpřístupníme, jakmile se podaří bezpečně ověřit cenu."}</span>{catalogStatus === "unavailable" && isSupabaseConfigured() && <button className="text-button dark" type="button" onClick={onRefreshCatalog}>Ověřit katalog znovu</button>}</div>}
+      {catalogStatus === "verified" && ownershipBlocked && <div className={`catalog-status ${ownershipStatus === "unavailable" ? "error" : ""}`} role="status" aria-live="polite"><b>{ownershipStatus === "loading" ? "Ověřujeme tvoje zakoupené trasy…" : "Nákupy teď nelze bezpečně ověřit"}</b><span>{ownershipStatus === "loading" ? "Než nabídneme další nákup, zkontrolujeme tvůj městský pas." : "Nic jsme nesmazali. Obnov ověření a pak můžeš bezpečně pokračovat."}</span>{ownershipStatus === "unavailable" && <button className="text-button dark" type="button" onClick={onRefreshOwnership}>Ověřit znovu</button>}</div>}
+
       <section className="city-bar section-wrap">
         <div><span className="section-label">Vyber město</span><h2>Kde budeš pátrat?</h2></div>
         <div className="city-pills">
@@ -752,7 +884,7 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
         <button className={routeFilter === "seasonal" ? "active" : ""} aria-pressed={routeFilter === "seasonal"} onClick={() => setRouteFilter("seasonal")}>Vánoční a sezónní</button>
       </div>
 
-      <CityRouteMap routes={filteredRoutes} releasedRouteIds={commerciallyReleasedRouteIds} onBuy={(route) => onBuy("route", route)} onDetail={onDetail} />
+      <CityRouteMap routes={filteredRoutes} releasedRouteIds={commerciallyReleasedRouteIds} catalogStatus={purchaseCatalogStatus} onBuy={(route) => onBuy("route", route)} onDetail={onDetail} />
 
       <section className="routes-section section-wrap">
         <div className="section-heading">
@@ -760,7 +892,7 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
           <span className="route-count">{activeRouteCount} aktivní · {upcomingRouteCount} připravujeme · {seasonalRouteCount} sezónní</span>
         </div>
         <div className="route-grid">
-          {filteredRoutes.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={() => onDetail(route)} />)}
+          {filteredRoutes.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} catalogStatus={catalogStatus} onDetail={() => onDetail(route)} />)}
         </div>
       </section>
 
@@ -784,8 +916,11 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
   );
 }
 
-function RouteCard({ route, index, onDetail }: { route: RouteSummary; index: number; onDetail: () => void }) {
+function RouteCard({ route, index, catalogStatus, onDetail }: { route: RouteSummary; index: number; catalogStatus: CommerceCatalogStatus; onDetail: () => void }) {
   const active = canPurchasePublishedRoute(route, commerciallyReleasedRouteIds);
+  const priceLabel = active
+    ? catalogStatus === "verified" ? `${route.price} Kč` : catalogStatus === "loading" ? "Ověřuji cenu…" : "Prodej pozastaven"
+    : route.status === "seasonal" ? route.available : "Již brzy";
   return (
     <article className={`route-card ${route.accent} ${!active ? "muted" : ""}`}>
       <div className="route-visual">
@@ -801,16 +936,54 @@ function RouteCard({ route, index, onDetail }: { route: RouteSummary; index: num
         <p>{route.tagline}</p>
         <RouteSuitabilityBadges strollerStatus={route.strollerStatus} preschoolStatus={route.preschoolStatus} durationMaxMinutes={route.durationMaxMinutes} />
         <div className="route-stats"><span><small>Vzdálenost</small><b>{route.distance} km</b></span><span><small>Čas</small><b>{route.duration}</b></span><span><small>Obtížnost</small><b>{route.difficulty}</b></span></div>
-        <div className="route-card-footer"><strong>{active ? `${route.price} Kč` : route.status === "seasonal" ? route.available : "Již brzy"}</strong><button onClick={onDetail} aria-label={`Detail trasy ${route.title}`}>{active ? "Prozkoumat →" : "Prohlédnout koncept →"}</button></div>
+        <div className="route-card-footer"><strong>{priceLabel}</strong><button onClick={onDetail} aria-label={`Detail trasy ${route.title}`}>{active ? "Prozkoumat →" : "Prohlédnout koncept →"}</button></div>
       </div>
     </article>
   );
 }
 
-function RouteDetail({ route, owned, onBack, onBuy, onStart }: { route: RouteSummary; owned: boolean; onBack: () => void; onBuy: () => void; onStart: () => void | Promise<void> }) {
+function RouteDetail({ route, catalogStatus, ownershipStatus, ownershipCheckRequired, owned, onBack, onRefreshCatalog, onRefreshOwnership, onBuy, onStart }: {
+  route: RouteSummary;
+  catalogStatus: CommerceCatalogStatus;
+  ownershipStatus: RouteOwnershipStatus;
+  ownershipCheckRequired: boolean;
+  owned: boolean;
+  onBack: () => void;
+  onRefreshCatalog: () => void;
+  onRefreshOwnership: () => void;
+  onBuy: () => void;
+  onStart: () => void | Promise<void>;
+}) {
   const playable = canStartPublishedGame(route, commerciallyReleasedRouteIds);
+  const ownershipLoading = ownershipCheckRequired && ownershipStatus === "loading";
+  const ownershipUnavailable = ownershipCheckRequired && ownershipStatus === "unavailable";
+  const canBuy = playable && catalogStatus === "verified" && !ownershipLoading && !ownershipUnavailable;
   const isPilot = route.id === pilotRouteId;
   const previewCount = Math.min(route.checkpoints, 3);
+  const purchaseAction = !playable
+    ? undefined
+    : owned
+      ? onStart
+      : ownershipUnavailable
+        ? onRefreshOwnership
+        : canBuy
+          ? onBuy
+          : catalogStatus === "unavailable"
+            ? onRefreshCatalog
+            : undefined;
+  const purchaseLabel = !playable
+    ? "Čeká na terénní ověření"
+    : owned
+      ? "Vyrazit na trasu →"
+      : ownershipLoading
+        ? "Ověřuji zakoupené trasy…"
+        : ownershipUnavailable
+          ? "Znovu ověřit nákupy"
+          : canBuy
+            ? "Koupit trasu →"
+            : catalogStatus === "loading"
+              ? "Ověřuji cenu…"
+              : "Ověřit cenu znovu";
   return (
     <section className="detail-page">
       <div className="detail-hero">
@@ -833,8 +1006,8 @@ function RouteDetail({ route, owned, onBack, onBuy, onStart }: { route: RouteSum
           <div className="checkpoint-preview">{isPilot ? routePreviewStops.map((cp, index) => <div key={cp.id}><span>{index === 0 ? "⌖" : "?"}</span><div><b>{index === 0 ? cp.title : `Stopa ${index + 1} je skrytá`}</b><small>{index === 0 ? "Start výpravy" : "Odemkne se během hry"}</small></div></div>) : Array.from({ length: previewCount }, (_, index) => <div key={`${route.id}-preview-${index}`}><span>?</span><div><b>{`Plánovaná stopa ${index + 1}`}</b><small>Přesné místo zveřejníme až po terénním ověření</small></div></div>)}</div>
         </div>
         <aside className="purchase-card">
-          <div className="purchase-top"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{playable && owned ? "Zakoupeno" : `${route.price} Kč`}</strong><small>{playable ? "Jednorázově · bez předplatného" : "Plánovaná cena · zatím bez prodeje"}</small></div>
-          <button className="button primary full" onClick={playable ? (owned ? onStart : onBuy) : undefined} disabled={!playable}>{playable ? (owned ? "Vyrazit na trasu →" : "Koupit trasu →") : "Čeká na terénní ověření"}</button>
+          <div className="purchase-top" aria-live="polite"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{playable && owned ? "Zakoupeno" : ownershipLoading ? "Ověřuji nákupy…" : ownershipUnavailable ? "Nákupy neověřeny" : canBuy ? `${route.price} Kč` : playable ? catalogStatus === "loading" ? "Ověřuji cenu…" : "Nákup pozastaven" : `${route.price} Kč`}</strong><small>{playable && owned ? "Můžeš kdykoliv pokračovat" : ownershipLoading ? "Kontrolujeme, zda už tuto trasu vlastníš" : ownershipUnavailable ? "Nejdřív bezpečně obnov ověření městského pasu" : canBuy ? "Jednorázově · bez předplatného" : playable ? "Cenu před objednávkou ověřujeme v živém katalogu" : "Plánovaná cena · zatím bez prodeje"}</small></div>
+          <button className="button primary full" onClick={purchaseAction} disabled={!purchaseAction || ownershipLoading}>{purchaseLabel}</button>
           <ul><li>✓ Hraješ vlastním tempem</li><li>✓ Nápovědy přímo v aplikaci</li><li>✓ Postupné odkrývání míst</li><li>✓ Památeční odznak po dokončení</li></ul>
           <div className="gear"><b>Co s sebou?</b><p>Nabitý telefon, pohodlné boty, tužku a chuť dívat se kolem sebe.</p></div>
         </aside>
@@ -843,12 +1016,29 @@ function RouteDetail({ route, owned, onBack, onBuy, onStart }: { route: RouteSum
   );
 }
 
-function Library({ routes: ownedRoutes, progress, progressRouteId, notice, onDiscover, onStart, onDetail }: { routes: RouteSummary[]; progress: RouteProgress; progressRouteId: string; notice: string; onDiscover: () => void; onStart: (routeId: string) => void | Promise<void>; onDetail: (route: RouteSummary) => void }) {
+function Library({ routes: ownedRoutes, ownershipStatus, ownershipCheckRequired, progress, progressRouteId, notice, onRefreshOwnership, onDiscover, onStart, onDetail }: {
+  routes: RouteSummary[];
+  ownershipStatus: RouteOwnershipStatus;
+  ownershipCheckRequired: boolean;
+  progress: RouteProgress;
+  progressRouteId: string;
+  notice: string;
+  onRefreshOwnership: () => void;
+  onDiscover: () => void;
+  onStart: (routeId: string) => void | Promise<void>;
+  onDetail: (route: RouteSummary) => void;
+}) {
+  const ownershipLoading = ownershipCheckRequired && ownershipStatus === "loading";
+  const ownershipUnavailable = ownershipCheckRequired && ownershipStatus === "unavailable";
   return (
     <section className="page section-wrap">
-      <div className="page-heading"><span className="section-label">Tvoje sbírka</span><h1>Moje hry</h1><p>Zakoupené a rozehrané výpravy máš vždy po ruce.</p></div>
+      <div className="page-heading"><span className="section-label">Tvoje sbírka</span><h1>Moje hry</h1><p>Zakoupené a rozehrané výpravy máš vždy po ruce.</p>{ownershipCheckRequired && ownershipStatus === "verified" && <button className="text-button dark" type="button" onClick={onRefreshOwnership}>Zkontrolovat nové nákupy</button>}</div>
       {notice && <p className="form-message error" role="alert">{notice}</p>}
-      {ownedRoutes.length === 0 ? (
+      {ownershipLoading ? (
+        <div className="empty-state" role="status" aria-live="polite"><span>…</span><h2>Ověřujeme tvoje trasy</h2><p>Načítáme bezpečný seznam zakoupených výprav. Prázdný batoh ukážeme až po úspěšném ověření.</p></div>
+      ) : ownershipUnavailable ? (
+        <div className="empty-state" role="alert"><span>!</span><h2>Tvoje trasy teď neumíme ověřit</h2><p>Nic jsme nesmazali. Může jít jen o krátký výpadek nebo o právě připsanou platbu.</p><button className="button primary" type="button" onClick={onRefreshOwnership}>Zkusit ověření znovu</button></div>
+      ) : ownedRoutes.length === 0 ? (
         <div className="empty-state"><span>◇</span><h2>Batoh je zatím prázdný</h2><p>Vyber si první trasu a začni sbírat městské stopy.</p><button className="button primary" onClick={onDiscover}>Objevit trasy →</button></div>
       ) : (
         <div className="owned-routes">{ownedRoutes.map((route, index) => {

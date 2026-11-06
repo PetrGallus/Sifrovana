@@ -2,10 +2,11 @@
 
 /* eslint-disable @next/next/no-img-element -- The payment QR is generated as an in-memory data URL. */
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "../lib/supabase/client";
 import type { RoutePreschoolStatus, RouteStrollerStatus } from "../lib/route-suitability";
+import type { CommerceCatalogStatus } from "../lib/route-catalog";
 import { canPurchasePublishedRoute } from "../lib/route-playability";
 import { BrnoIllustratedMap } from "./brno-illustrated-map";
 import { RouteSuitabilityBadges } from "./route-suitability-badges";
@@ -66,18 +67,32 @@ function initials(name?: string | null, email?: string | null) {
 
 export function useSifrovanaAuth(): AuthController {
   const [session, setSession] = useState<Session | null>(null);
-  const [profile, setProfile] = useState<AppProfile | null>(null);
+  const [profileState, setProfileState] = useState<{
+    userId: string;
+    value: AppProfile;
+  } | null>(null);
   const [loading, setLoading] = useState(() => isSupabaseConfigured());
   const [recoveryMode, setRecoveryMode] = useState(false);
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+  const profileRequest = useRef(0);
+  const profile = session && profileState && session.user.id === profileState.userId
+    ? profileState.value
+    : null;
 
   const loadProfile = useCallback(async (user: User | null) => {
+    const requestId = ++profileRequest.current;
     if (!supabase || !user) {
-      setProfile(null);
+      setProfileState(null);
       return;
     }
-    const { data } = await supabase.from("profiles").select("*").eq("id", user.id).maybeSingle();
-    setProfile((data as AppProfile | null) ?? null);
+    const { data, error } = await supabase.from("profiles").select("*").eq("id", user.id).maybeSingle();
+    if (requestId !== profileRequest.current) return;
+    const nextProfile = error ? null : data as AppProfile | null;
+    setProfileState(
+      nextProfile?.id === user.id
+        ? { userId: user.id, value: nextProfile }
+        : null,
+    );
   }, [supabase]);
 
   useEffect(() => {
@@ -96,7 +111,8 @@ export function useSifrovanaAuth(): AuthController {
       } catch {
         if (active) {
           setSession(null);
-          setProfile(null);
+          profileRequest.current += 1;
+          setProfileState(null);
         }
       } finally {
         if (active) setLoading(false);
@@ -110,6 +126,7 @@ export function useSifrovanaAuth(): AuthController {
     });
     return () => {
       active = false;
+      profileRequest.current += 1;
       listener.subscription.unsubscribe();
     };
   }, [loadProfile, supabase]);
@@ -123,7 +140,8 @@ export function useSifrovanaAuth(): AuthController {
     refreshProfile: () => loadProfile(session?.user ?? null),
     signOut: async () => {
       if (supabase) await supabase.auth.signOut();
-      setProfile(null);
+      profileRequest.current += 1;
+      setProfileState(null);
     },
   };
 }
@@ -217,27 +235,52 @@ export function AuthModal({ auth, initialMode = "signin", onClose, onAuthenticat
   );
 }
 
-export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }: {
+type CheckoutModalProps = {
   auth: AuthController;
   kind: "route" | "bundle";
   route: RouteSummary;
   routes: RouteSummary[];
   onClose: () => void;
   onCreated: () => void;
+};
+
+export function CheckoutModal(props: CheckoutModalProps) {
+  const checkoutUserId = props.auth.user?.id ?? null;
+  return <CheckoutModalForUser key={checkoutUserId ?? "signed-out"} {...props} checkoutUserId={checkoutUserId} />;
+}
+
+function CheckoutModalForUser({ auth, kind, route, routes, onClose, onCreated, checkoutUserId }: CheckoutModalProps & {
+  checkoutUserId: string | null;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [couponCode, setCouponCode] = useState("");
   const [order, setOrder] = useState<{ id: string; variableSymbol: string; qr: string | null; amount: number; gross: number; discount: number } | null>(null);
+  const checkoutRequest = useRef(0);
+  const mounted = useRef(true);
   const price = kind === "route" ? route.price : 999;
   const routeCount = kind === "route" ? 1 : Math.min(3, routes.length);
   const title = kind === "route" ? `${route.district}: ${route.title}` : "Balíček 3 tras";
   const paymentIban = process.env.NEXT_PUBLIC_PAYMENT_IBAN?.replace(/\s/g, "") || null;
   const dialogRef = useAccessibleModal(onClose);
 
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      checkoutRequest.current += 1;
+    };
+  }, []);
+
+  function requestIsCurrent(requestId: number, requestUserId: string) {
+    return mounted.current
+      && checkoutRequest.current === requestId
+      && checkoutUserId === requestUserId;
+  }
+
   async function createOrder() {
     const supabase = getSupabaseBrowserClient();
-    if (!supabase || !auth.user) return;
+    if (!supabase || !auth.user || !checkoutUserId || auth.user.id !== checkoutUserId) return;
     if (!paymentIban) {
       setError("Platební účet není nakonfigurovaný. Objednávku proto zatím nelze vytvořit.");
       return;
@@ -246,6 +289,8 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
       setError("Balíček bude možné koupit po publikaci všech zahrnutých tras.");
       return;
     }
+    const requestUserId = checkoutUserId;
+    const requestId = ++checkoutRequest.current;
     setBusy(true);
     setError("");
     try {
@@ -253,6 +298,7 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
         p_route_id: route.id,
         p_discount_code: couponCode.trim() || null,
       });
+      if (!requestIsCurrent(requestId, requestUserId)) return;
       if (orderError || !data) {
         setError(orderError?.message ?? "Objednávku se nepodařilo vytvořit.");
         return;
@@ -263,30 +309,49 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
       if (paymentIban) {
         try {
           const { default: QRCode } = await import("qrcode");
+          if (!requestIsCurrent(requestId, requestUserId)) return;
           const spd = `SPD*1.0*ACC:${paymentIban}*AM:${created.amount_czk.toFixed(2)}*CC:CZK*X-VS:${created.variable_symbol}*MSG:SIFROVANA`;
           qr = await QRCode.toDataURL(spd, { margin: 1, width: 280, color: { dark: "#0e3b3a", light: "#fffdf7" } });
+          if (!requestIsCurrent(requestId, requestUserId)) return;
         } catch {
+          if (!requestIsCurrent(requestId, requestUserId)) return;
           setError("Objednávka vznikla, ale platební QR se nepodařilo vykreslit. Použij údaje pro ruční převod.");
         }
       }
+      if (!requestIsCurrent(requestId, requestUserId)) return;
       setOrder({ id: created.order_id, variableSymbol: created.variable_symbol, qr, amount: created.amount_czk, gross: created.gross_amount_czk, discount: created.discount_amount_czk });
       onCreated();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Objednávku se nepodařilo vytvořit.");
+      if (requestIsCurrent(requestId, requestUserId)) {
+        setError(reason instanceof Error ? reason.message : "Objednávku se nepodařilo vytvořit.");
+      }
     } finally {
-      setBusy(false);
+      if (requestIsCurrent(requestId, requestUserId)) setBusy(false);
     }
   }
 
   async function cancelOrder() {
     const supabase = getSupabaseBrowserClient();
-    if (!supabase || !order || busy) return;
+    if (!supabase || !order || busy || !checkoutUserId || auth.user?.id !== checkoutUserId) return;
+    const requestUserId = checkoutUserId;
+    const requestId = ++checkoutRequest.current;
     setBusy(true);
-    const { error: cancelError } = await supabase.rpc("cancel_checkout_order", { p_order_id: order.id });
-    setBusy(false);
-    if (cancelError) return setError(cancelError.message);
-    setOrder(null);
     setError("");
+    try {
+      const { error: cancelError } = await supabase.rpc("cancel_checkout_order", { p_order_id: order.id });
+      if (!requestIsCurrent(requestId, requestUserId)) return;
+      if (cancelError) {
+        setError(cancelError.message);
+        return;
+      }
+      setOrder(null);
+    } catch (reason) {
+      if (requestIsCurrent(requestId, requestUserId)) {
+        setError(reason instanceof Error ? reason.message : "Objednávku se nepodařilo zrušit.");
+      }
+    } finally {
+      if (requestIsCurrent(requestId, requestUserId)) setBusy(false);
+    }
   }
 
   return (
@@ -315,7 +380,7 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
   );
 }
 
-export function CityRouteMap({ routes, releasedRouteIds, onBuy, onDetail }: { routes: RouteSummary[]; releasedRouteIds: readonly string[]; onBuy: (route: RouteSummary) => void; onDetail: (route: RouteSummary) => void }) {
+export function CityRouteMap({ routes, releasedRouteIds, catalogStatus, onBuy, onDetail }: { routes: RouteSummary[]; releasedRouteIds: readonly string[]; catalogStatus: CommerceCatalogStatus; onBuy: (route: RouteSummary) => void; onDetail: (route: RouteSummary) => void }) {
   const [selectedId, setSelectedId] = useState(routes[0]?.id ?? "");
   const selected = routes.find((route) => route.id === selectedId) ?? routes[0];
   const districtGroups = useMemo(() => {
@@ -335,7 +400,9 @@ export function CityRouteMap({ routes, releasedRouteIds, onBuy, onDetail }: { ro
   if (!selected) return null;
   const selectedMapDistrict = selected.mapDistrict ?? selected.district;
   const selectedDistrictRoutes = districtGroups.find((group) => group.district === selectedMapDistrict)?.routes ?? [selected];
-  const purchasable = canPurchasePublishedRoute(selected, releasedRouteIds);
+  const published = canPurchasePublishedRoute(selected, releasedRouteIds);
+  const purchasable = published && catalogStatus === "verified";
+  const priceLabel = purchasable ? `${selected.price} Kč` : published ? catalogStatus === "loading" ? "Ověřuji…" : "Pozastaveno" : `${selected.price} Kč`;
 
   return (
     <section className="city-route-map section-wrap" aria-label="Interaktivní mapa tras v Brně">
@@ -355,8 +422,8 @@ export function CityRouteMap({ routes, releasedRouteIds, onBuy, onDetail }: { ro
         {selectedDistrictRoutes.length > 1 && <div className="map-route-variants" aria-label={`Trasy v lokalitě ${selected.district}`}>{selectedDistrictRoutes.map((route) => <button key={route.id} className={route.id === selected.id ? "active" : ""} onClick={() => setSelectedId(route.id)} aria-pressed={route.id === selected.id}>{route.title}</button>)}</div>}
         <RouteSuitabilityBadges strollerStatus={selected.strollerStatus} preschoolStatus={selected.preschoolStatus} durationMaxMinutes={selected.durationMaxMinutes} compact />
         <div className="map-route-stats"><span><small>Délka</small><b>{selected.distance} km</b></span><span><small>Čas</small><b>{selected.duration}</b></span><span><small>Licence</small><b>Tým 1–5</b></span></div>
-        <div className="map-price"><div><small>{purchasable ? "Za celý tým" : "Plánovaná cena"}</small><strong>{selected.price} Kč</strong></div><div className="map-price-actions"><button className="button secondary" onClick={() => onDetail(selected)}>Detail trasy</button><button className="button primary" onClick={() => onBuy(selected)} disabled={!purchasable}>{purchasable ? "Koupit →" : "Připravujeme"}</button></div></div>
-        <p className="map-availability">{purchasable ? "Připraveno ke hraní" : `Dostupné po terénním ověření · ${selected.available ?? "připravujeme"}`}</p>
+        <div className="map-price"><div><small>{purchasable ? "Za celý tým" : published ? "Živá cena není ověřená" : "Plánovaná cena"}</small><strong>{priceLabel}</strong></div><div className="map-price-actions"><button className="button secondary" onClick={() => onDetail(selected)}>Detail trasy</button><button className="button primary" onClick={() => onBuy(selected)} disabled={!purchasable}>{purchasable ? "Koupit →" : published ? catalogStatus === "loading" ? "Ověřuji cenu…" : "Nákup pozastaven" : "Připravujeme"}</button></div></div>
+        <p className="map-availability">{purchasable ? "Připraveno ke hraní" : published ? "Trasu lze prohlížet; nákup se odemkne po bezpečném ověření katalogu." : `Dostupné po terénním ověření · ${selected.available ?? "připravujeme"}`}</p>
       </aside>
     </section>
   );
