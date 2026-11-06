@@ -15,7 +15,7 @@ Pilotní trasou je **Královo Pole: Stopy proměny**. Jedna licence platí pro t
 
 Podrobná rozhodovací pravidla jsou v [produktové konstituci](docs/PRODUCT_CONSTITUTION.md).
 
-## Aktuální stav
+## Implementováno v repozitáři
 
 - responzivní marketplace a detail pilotní trasy;
 - průchod pěti checkpointy z neměnné publikované verze CMS; odpovědi se ověřují pouze serverově a budoucí body se do klienta neposílají;
@@ -24,10 +24,17 @@ Podrobná rozhodovací pravidla jsou v [produktové konstituci](docs/PRODUCT_CON
 - Supabase Auth, role, CMS pro trasy/checkpointy/zdroje/fotografie a verzované publikace;
 - administrace procentních i pevných slevových kupónů s limitem použití;
 - QR platba převodem po nastavení veřejného IBANu a ruční potvrzení superadminem;
-- vložená mapa s volitelným Google Maps Embed, bezklíčovým fallbackem a odkazy do Mapy.com i Google Maps;
+- lokální ilustrovaná mapa z otevřených WGS84 dat Brna (29 MČ a hlavní vodní toky), bez API klíče a průběžných nákladů;
+- herní mapa aktuálního checkpointu s volitelným Google Maps Embed, bezklíčovým fallbackem a odkazy do Mapy.com i Google Maps;
 - nasazení přes OpenAI Sites.
 
-Pilotní obsah je demonstrační a historické informace i fyzické indicie musí před ostrým prodejem projít terénní kontrolou.
+## Dosud neověřeno pro ostrý provoz
+
+- databázové migrace jsou navazující; pro nový Supabase projekt stále chybí verzovaný baseline základních tabulek;
+- produkční konfigurace účtu, rolí, e-mailů, plateb a publikovaných verzí musí projít samostatným end-to-end testem;
+- všechny trasy včetně pilotu mají demonstrační obsah a nulové datum poslední terénní kontroly;
+- historické informace, fyzické indicie, bezbariérovost a bezpečnost každého bodu se musí ověřit přímo na místě před prvním ostrým prodejem;
+- fyzické prvky jsou pouze post-MVP experiment popsaný v provozním návrhu, nikoli součást prvního ostrého vydání.
 
 ## Lokální vývoj
 
@@ -45,19 +52,31 @@ Ověření změn:
 
 ```bash
 pnpm lint
+pnpm typecheck
 pnpm test
+# nebo vše jedním příkazem
+pnpm check
+```
+
+Obnova lokálního mapového snapshotu z otevřených dat města Brna:
+
+```bash
+pnpm map:generate
 ```
 
 ## Proměnné prostředí
 
 ```bash
+NEXT_PUBLIC_SITE_URL=https://sifrovana-mestska-hra.galluspeginpetr.chatgpt.site
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
 NEXT_PUBLIC_PAYMENT_IBAN=
 NEXT_PUBLIC_GOOGLE_MAPS_EMBED_KEY=
 ```
 
-`NEXT_PUBLIC_PAYMENT_IBAN` je veřejný účet příjemce ve formátu IBAN. Bez něj lze vytvořit objednávku, ale aplikace záměrně nevygeneruje neplatný platební QR kód.
+`NEXT_PUBLIC_SITE_URL` je jediný důvěryhodný základ pro canonical a sociální URL. Pokud chybí nebo je neplatný, aplikace použije veřejnou adresu Sites; hodnoty z HTTP hlaviček do metadat nepřebírá.
+
+`NEXT_PUBLIC_PAYMENT_IBAN` je veřejný účet příjemce ve formátu IBAN. Bez něj je vytvoření objednávky záměrně zakázané, aby nevznikaly rezervace, které nelze zaplatit.
 
 `NEXT_PUBLIC_GOOGLE_MAPS_EMBED_KEY` je volitelný veřejný klíč omezený na Maps Embed API a domény Šifrované. Bez něj herní mapa automaticky použije bezklíčový náhled OpenStreetMap; externí navigace v Mapy.com a Google Maps funguje bez klíče vždy.
 
@@ -66,9 +85,11 @@ NEXT_PUBLIC_GOOGLE_MAPS_EMBED_KEY=
 - `app/` – uživatelské rozhraní a společný herní engine;
 - `lib/route-content.ts` – typovaný veřejný katalog měst a produktů bez řešení šifer;
 - `lib/supabase/` – klient a serverové napojení Supabase;
-- `supabase/migrations/` – produkční CMS, hra, účty a kupóny;
+- `supabase/migrations/` – navazující produkční migrace CMS, hry a kupónů; před založením nového projektu je ještě nutný verzovaný baseline základních tabulek;
 - `supabase/deferred/` – připravené, ale nenasazené funkce pro některou další verzi;
 - `docs/PRODUCT_CONSTITUTION.md` – produktové mantinely, ekonomika a expanzní brány;
+- `docs/architecture/map-foundation.md` – zdroje, licence a rozšiřování mapového základu;
+- `docs/field/physical-layer-plan.md` – nízkoúdržbový návrh fyzických prvků pro jednotlivé trasy;
 - `tests/` – server-render a kontrola základních produktových kontraktů.
 
 ## Důležité omezení

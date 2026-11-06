@@ -46,6 +46,8 @@ export type RouteProduct = {
   sourceRefs: SourceRef[];
   accent: string;
   available?: string;
+  availableFrom?: string;
+  availableTo?: string;
   mapX: number;
   mapY: number;
 };
@@ -58,6 +60,10 @@ export type RouteBundle = {
 };
 
 export const pilotRouteId = "brno-kralovo-pole-stopy";
+/** Versioned release manifest; add an ID only with a published game and tested checkout. */
+export const commerciallyReleasedRouteIds = [pilotRouteId] as const;
+/** Bundle checkout is not implemented yet; keep every bundle disabled until its own flow is released. */
+export const commerciallyReleasedBundleIds: readonly string[] = [];
 const defaultTeamSize = { min: 1, max: 5 } as const;
 
 export const routes: RouteProduct[] = [

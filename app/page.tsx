@@ -2,9 +2,8 @@
 
 /* eslint-disable @next/next/no-img-element -- Selfie uses a local object URL and is never uploaded. */
 
-import { ChangeEvent, PointerEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ChangeEvent, lazy, PointerEvent, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import {
-  AdminCenter,
   AuthModal,
   CheckoutModal,
   CityRouteMap,
@@ -21,13 +20,19 @@ import type { PublishedGameCheckpoint, PublishedGameSession } from "../lib/supab
 import {
   bundle,
   cities,
+  commerciallyReleasedBundleIds,
+  commerciallyReleasedRouteIds,
   pilotRouteId,
   routes,
 } from "../lib/route-content";
-import { normalizePreschoolStatus, normalizeStrollerStatus } from "../lib/route-suitability";
+import { mergePublicCatalogRoutes, PUBLIC_ROUTE_CATALOG_SELECT } from "../lib/route-catalog";
 import { RouteSuitabilityBadges } from "./route-suitability-badges";
+import { BrnoIllustratedMap } from "./brno-illustrated-map";
+import { canPurchasePublishedRoute, canStartPublishedGame } from "../lib/route-playability";
+import { buildAppSearch, parseAppLocation, type AppView } from "../lib/app-location";
 
-type View = "discover" | "detail" | "library" | "game" | "finish" | "activity" | "profile" | "admin" | "partners" | "contact";
+const AdminCenter = lazy(() => import("./admin-center").then((module) => ({ default: module.AdminCenter })));
+
 type Modal = "login" | "checkout" | null;
 type RouteProgress = { current: number; solved: string[]; hintsUsed: number; completed: boolean };
 type Activity = { id: string; title: string; date: string; distance: string; time: string };
@@ -90,9 +95,12 @@ const staticRouteSummaries: RouteSummary[] = routes.map((route) => ({
   status: route.status,
   accent: route.accent,
   available: route.available,
+  availableFrom: route.availableFrom,
+  availableTo: route.availableTo,
   mapX: route.mapX,
   mapY: route.mapY,
 }));
+const staticRouteIds = staticRouteSummaries.map((route) => route.id);
 
 const baseActivities: Activity[] = [];
 
@@ -133,8 +141,8 @@ function publishedCheckpointToView(checkpoint: PublishedGameCheckpoint, result: 
 
 export default function Home() {
   const auth = useSifrovanaAuth();
-  const publishedGame = usePublishedGame();
-  const [view, setView] = useState<View>("discover");
+  const publishedGame = usePublishedGame(auth.user?.id ?? null);
+  const [view, setView] = useState<AppView>("discover");
   const [modal, setModal] = useState<Modal>(null);
   const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
   const [state, setState] = useState<StoredState>(initialState);
@@ -149,14 +157,48 @@ export default function Home() {
   const [proofMode, setProofMode] = useState<"photo" | "signature" | "skip">("photo");
   const [checkoutItem, setCheckoutItem] = useState<"route" | "bundle">("route");
   const [catalogRoutes, setCatalogRoutes] = useState<RouteSummary[]>(staticRouteSummaries);
-  const [selectedRoute, setSelectedRoute] = useState<RouteSummary>(staticRouteSummaries[0]);
+  const [selectedRouteId, setSelectedRouteId] = useState(pilotRouteId);
   const [resumeCheckout, setResumeCheckout] = useState(false);
-  const [ownedRouteIds, setOwnedRouteIds] = useState<string[]>([]);
+  const [routeOwnership, setRouteOwnership] = useState<{ userId: string; routeIds: string[] } | null>(null);
   const [publishedResult, setPublishedResult] = useState<PublishedResult | null>(null);
   const [gameMessage, setGameMessage] = useState("");
+  const [resumeCheckedKey, setResumeCheckedKey] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileMenuRef = useRef<HTMLElement>(null);
   const drawing = useRef(false);
+  const photoUrlRef = useRef<string | null>(null);
   const resumeAttemptedUser = useRef<string | null>(null);
+  const currentUserId = auth.user?.id ?? null;
+  const ownedRouteIds = routeOwnership?.userId === currentUserId ? routeOwnership.routeIds : [];
+
+  useEffect(() => {
+    const applyLocation = (moveFocus = false) => {
+      const location = parseAppLocation(window.location.search, staticRouteIds, pilotRouteId);
+      setSelectedRouteId(location.routeId);
+      setView(location.view);
+      setMenuOpen(false);
+      setModal(null);
+      if (moveFocus) window.requestAnimationFrame(() => mainRef.current?.focus({ preventScroll: true }));
+    };
+    applyLocation();
+    const handlePopState = () => applyLocation(true);
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    mobileMenuRef.current?.querySelector<HTMLElement>("button")?.focus();
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMenuOpen(false);
+      menuButtonRef.current?.focus();
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [menuOpen]);
 
   const applyPublishedSession = useCallback((session: PublishedGameSession) => {
     const currentCheckpoint = session.checkpoints.find(
@@ -202,56 +244,30 @@ export default function Home() {
     }
   }, [state.activityAdded, hydrated]);
 
+  useEffect(() => () => {
+    if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
+  }, []);
+
   useEffect(() => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase) return;
     let active = true;
-    supabase.from("routes").select("id,district,title,tagline,price_czk,distance_km,duration_minutes,duration_min_minutes,duration_max_minutes,stroller_status,preschool_status,difficulty,checkpoint_count,status,accent,map_x,map_y,available_text").then(({ data }) => {
+    supabase.from("routes").select(PUBLIC_ROUTE_CATALOG_SELECT).then(({ data }) => {
       if (!active || !data) return;
-      const byId = new Map(data.map((item) => [item.id as string, item]));
-      const nextRoutes = staticRouteSummaries.map((route) => {
-        const live = byId.get(route.id);
-        if (!live) return route;
-        const durationMin = Number(live.duration_min_minutes);
-        const durationMax = Number(live.duration_max_minutes);
-        return {
-          ...route,
-          district: String(live.district),
-          title: String(live.title),
-          tagline: String(live.tagline),
-          price: Number(live.price_czk),
-          distance: Number(live.distance_km),
-          duration: Number.isFinite(durationMin) && Number.isFinite(durationMax)
-            ? `${durationMin === durationMax ? durationMin : `${durationMin}–${durationMax}`} min`
-            : route.duration,
-          durationMinMinutes: Number.isFinite(durationMin) ? durationMin : route.durationMinMinutes,
-          durationMaxMinutes: Number.isFinite(durationMax) ? durationMax : route.durationMaxMinutes,
-          strollerStatus: normalizeStrollerStatus(live.stroller_status),
-          preschoolStatus: normalizePreschoolStatus(live.preschool_status),
-          difficulty: String(live.difficulty),
-          checkpoints: Number(live.checkpoint_count),
-          status: live.status as RouteSummary["status"],
-          accent: String(live.accent),
-          mapX: Number(live.map_x),
-          mapY: Number(live.map_y),
-          available: live.available_text ? String(live.available_text) : route.available,
-        };
-      });
+      const nextRoutes = mergePublicCatalogRoutes(staticRouteSummaries, data);
       setCatalogRoutes(nextRoutes);
-      setSelectedRoute((current) => nextRoutes.find((route) => route.id === current.id) ?? nextRoutes[0]);
+      setSelectedRouteId((current) => nextRoutes.some((route) => route.id === current) ? current : (nextRoutes[0]?.id ?? pilotRouteId));
     });
     return () => { active = false; };
   }, []);
 
   useEffect(() => {
     const supabase = getSupabaseBrowserClient();
-    if (!supabase || !auth.user) {
-      const timer = window.setTimeout(() => setOwnedRouteIds([]), 0);
-      return () => window.clearTimeout(timer);
-    }
+    if (!supabase || !auth.user) return;
+    const userId = auth.user.id;
     let active = true;
-    supabase.from("user_route_access").select("route_id").eq("user_id", auth.user.id).then(({ data }) => {
-      if (active) setOwnedRouteIds((data ?? []).map((item) => item.route_id as string));
+    supabase.from("user_route_access").select("route_id").eq("user_id", userId).then(({ data }) => {
+      if (active) setRouteOwnership({ userId, routeIds: (data ?? []).map((item) => item.route_id as string) });
     });
     return () => { active = false; };
   }, [auth.user]);
@@ -266,15 +282,16 @@ export default function Home() {
       resumeAttemptedUser.current = null;
       return;
     }
+    const resumeKey = `${userId}:${selectedRouteId}`;
     if (
       !publishedGame.backendConfigured
       || publishedGame.session
-      || resumeAttemptedUser.current === userId
+      || resumeAttemptedUser.current === resumeKey
     ) return;
 
-    resumeAttemptedUser.current = userId;
+    resumeAttemptedUser.current = resumeKey;
     let active = true;
-    void resumeLastPublishedGame(demoRoute.id)
+    void resumeLastPublishedGame(selectedRouteId)
       .then((session) => {
         if (!active || !session) return;
         setArrived(false);
@@ -283,12 +300,23 @@ export default function Home() {
         setFallbackMode(false);
         setPublishedResult(null);
         setGameMessage("");
+        setSelectedRouteId(session.routeId);
         applyPublishedSession(session);
-        setView(session.progress.completedAt ? "finish" : "game");
-        window.scrollTo({ top: 0, behavior: "auto" });
+        const requestedView = parseAppLocation(window.location.search, staticRouteIds, pilotRouteId).view;
+        if (requestedView === "game" || requestedView === "finish") {
+          const nextView = session.progress.completedAt ? "finish" : "game";
+          setView(nextView);
+          const search = buildAppSearch(nextView, session.routeId, window.location.search);
+          window.history.replaceState(null, "", `${window.location.pathname}${search}${window.location.hash}`);
+          window.scrollTo({ top: 0, behavior: "auto" });
+          window.requestAnimationFrame(() => mainRef.current?.focus({ preventScroll: true }));
+        }
       })
       .catch(() => {
         if (active) clearPublishedGameError();
+      })
+      .finally(() => {
+        if (active) setResumeCheckedKey(resumeKey);
       });
     return () => { active = false; };
   }, [
@@ -299,6 +327,7 @@ export default function Home() {
     publishedGame.backendConfigured,
     publishedGame.session,
     resumeLastPublishedGame,
+    selectedRouteId,
   ]);
 
   const publishedCheckpoint = publishedResult?.checkpoint ?? publishedGame.currentCheckpoint;
@@ -314,6 +343,8 @@ export default function Home() {
   const completed = Boolean(publishedGame.session?.progress.completedAt)
     || state.progress.completed
     || state.activityAdded;
+  const currentGameCompleted = Boolean(publishedGame.session?.progress.completedAt)
+    || state.progress.completed;
   const displayProgress: RouteProgress = publishedGame.session
     ? {
         current: Math.min(
@@ -325,7 +356,10 @@ export default function Home() {
         completed,
       }
     : { ...state.progress, completed };
-  const ownsPilotRoute = auth.profile?.role === "superadmin" || ownedRouteIds.includes(demoRoute.id);
+  const ownedPlayableRoutes = catalogRoutes.filter((route) => (
+    canStartPublishedGame(route, commerciallyReleasedRouteIds)
+    && (auth.profile?.role === "superadmin" || ownedRouteIds.includes(route.id))
+  ));
   const earnedBadges = badges.map((badge) => (badge.id === "king" && completed ? { ...badge, earned: true } : badge));
   const activities = state.activityAdded
     ? [{ id: "pilot", title: "Královo Pole: Stopy proměny", date: "Dnes", distance: "4,1 km", time: "1:34" }, ...baseActivities]
@@ -333,19 +367,55 @@ export default function Home() {
   const accountName = auth.profile?.username || auth.profile?.display_name || auth.user?.email?.split("@")[0] || "Přihlásit";
   const accountInitials = accountName.split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
   const pilotRouteSummary = catalogRoutes.find((route) => route.id === demoRoute.id) ?? staticRouteSummaries[0];
+  const selectedRoute = catalogRoutes.find((route) => route.id === selectedRouteId) ?? pilotRouteSummary;
+  const expectedResumeKey = currentUserId ? `${currentUserId}:${selectedRouteId}` : null;
+  const resumeCheckComplete = !currentUserId
+    || !publishedGame.backendConfigured
+    || Boolean(publishedGame.session)
+    || resumeCheckedKey === expectedResumeKey;
+  const protectedViewReady = hydrated && !auth.loading && resumeCheckComplete;
+  const protectedViewPending = (view === "game" || view === "finish") && (
+    !protectedViewReady
+    || (view === "game" && !publishedGame.session)
+    || (view === "finish" && !currentGameCompleted)
+  );
 
-  function navigate(next: View) {
+  useEffect(() => {
+    if (!hydrated || auth.loading || !resumeCheckComplete) return;
+    const invalidFinish = view === "finish" && !currentGameCompleted;
+    const invalidGame = view === "game" && !publishedGame.session && !publishedGame.busy;
+    if (!invalidFinish && !invalidGame) return;
+    const timer = window.setTimeout(() => {
+      setView("library");
+      const search = buildAppSearch("library", selectedRouteId, window.location.search);
+      window.history.replaceState(null, "", `${window.location.pathname}${search}${window.location.hash}`);
+      window.requestAnimationFrame(() => mainRef.current?.focus({ preventScroll: true }));
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [auth.loading, currentGameCompleted, hydrated, publishedGame.busy, publishedGame.session, resumeCheckComplete, selectedRouteId, view]);
+
+  function navigate(next: AppView, routeId = selectedRouteId) {
     setView(next);
     setMenuOpen(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    const search = buildAppSearch(next, routeId, window.location.search);
+    window.history.pushState(null, "", `${window.location.pathname}${search}${window.location.hash}`);
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+    window.requestAnimationFrame(() => mainRef.current?.focus({ preventScroll: true }));
+  }
+
+  function openRouteDetail(route: RouteSummary) {
+    setSelectedRouteId(route.id);
+    navigate("detail", route.id);
   }
 
   function openPurchase(item: "route" | "bundle" = "route", requestedRoute?: RouteSummary) {
-    const route = requestedRoute ?? catalogRoutes[0];
-    const bundleReady = bundle.routeIds.every((routeId) => catalogRoutes.find((candidate) => candidate.id === routeId)?.status === "active");
-    if (!route || (item === "route" && route.status !== "active") || (item === "bundle" && !bundleReady)) return;
+    const route = requestedRoute ?? catalogRoutes.find((candidate) => canPurchasePublishedRoute(candidate, commerciallyReleasedRouteIds));
+    const bundleReady = commerciallyReleasedBundleIds.includes(bundle.id)
+      && bundle.routeIds.every((routeId) => canPurchasePublishedRoute(catalogRoutes.find((candidate) => candidate.id === routeId), commerciallyReleasedRouteIds));
+    if (!route || (item === "route" && !canPurchasePublishedRoute(route, commerciallyReleasedRouteIds)) || (item === "bundle" && !bundleReady)) return;
     setCheckoutItem(item);
-    setSelectedRoute(route);
+    setSelectedRouteId(route.id);
     setResumeCheckout(true);
     if (!auth.user) {
       setAuthMode("signin");
@@ -362,11 +432,18 @@ export default function Home() {
     void auth.refreshProfile();
   }
 
-  async function startGame() {
+  async function startGame(requestedRouteId = selectedRouteId) {
     resetCheckpointUi();
     setGameMessage("");
-    if (!ownsPilotRoute) {
-      openPurchase("route");
+    const requestedRoute = catalogRoutes.find((route) => route.id === requestedRouteId);
+    if (!requestedRoute || !canStartPublishedGame(requestedRoute, commerciallyReleasedRouteIds)) {
+      setGameMessage("Tato trasa je zatím pracovní koncept. Spustit ji půjde až po terénním ověření a publikaci.");
+      if (requestedRoute) openRouteDetail(requestedRoute);
+      return;
+    }
+    const ownsRequestedRoute = auth.profile?.role === "superadmin" || ownedRouteIds.includes(requestedRoute.id);
+    if (!ownsRequestedRoute) {
+      openPurchase("route", requestedRoute);
       return;
     }
     if (!publishedGame.backendConfigured) {
@@ -375,7 +452,7 @@ export default function Home() {
       return;
     }
     try {
-      const session = await publishedGame.start(demoRoute.id);
+      const session = await publishedGame.start(requestedRoute.id);
       setPublishedResult(null);
       applyPublishedSession(session);
       navigate(session.progress.completedAt ? "finish" : "game");
@@ -453,6 +530,9 @@ export default function Home() {
 
   function finishRoute() {
     publishedGame.clear();
+    if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
+    photoUrlRef.current = null;
+    setPhoto(null);
     setState((current) => ({ ...current, activityAdded: true }));
     navigate("profile");
   }
@@ -460,8 +540,10 @@ export default function Home() {
   function handlePhoto(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (photo) URL.revokeObjectURL(photo);
-    setPhoto(URL.createObjectURL(file));
+    if (photoUrlRef.current) URL.revokeObjectURL(photoUrlRef.current);
+    const nextUrl = URL.createObjectURL(file);
+    photoUrlRef.current = nextUrl;
+    setPhoto(nextUrl);
   }
 
   function pointerPosition(event: PointerEvent<HTMLCanvasElement>) {
@@ -504,8 +586,6 @@ export default function Home() {
     if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
   }
 
-  if (!hydrated) return <div className="loading-shell"><span className="loader-mark">Š</span><p>Rozkládáme mapu…</p></div>;
-
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -524,11 +604,11 @@ export default function Home() {
           <span>{auth.user ? accountInitials : "?"}</span>
           <b>{auth.user ? accountName : "Přihlásit"}</b>
         </button>
-        <button className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Otevřít menu" aria-expanded={menuOpen}>☰</button>
+        <button ref={menuButtonRef} className="menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label={menuOpen ? "Zavřít menu" : "Otevřít menu"} aria-expanded={menuOpen} aria-controls="mobile-menu">☰</button>
       </header>
 
       {menuOpen && (
-        <div className="mobile-menu">
+        <nav ref={mobileMenuRef} id="mobile-menu" className="mobile-menu" aria-label="Mobilní rozšířená navigace">
           <button onClick={() => navigate("discover")}>Objevuj trasy</button>
           <button onClick={() => navigate("library")}>Moje hry</button>
           <button onClick={() => navigate("activity")}>Aktivita</button>
@@ -536,14 +616,15 @@ export default function Home() {
           {(auth.profile?.role === "route_manager" || auth.profile?.role === "superadmin") && <button onClick={() => navigate("admin")}>Správa</button>}
           <button onClick={() => navigate("partners")}>Pro partnery</button>
           <button onClick={() => navigate("contact")}>Kontakt</button>
-        </div>
+        </nav>
       )}
 
-      <main>
-        {view === "discover" && <Discover routesForSale={catalogRoutes} onDetail={() => navigate("detail")} onBuy={openPurchase} />}
-        {view === "detail" && <RouteDetail route={pilotRouteSummary} owned={ownsPilotRoute} onBack={() => navigate("discover")} onBuy={() => openPurchase("route")} onStart={startGame} />}
-        {view === "library" && <Library owned={ownsPilotRoute} progress={displayProgress} totalCheckpoints={totalCheckpoints} notice={gameMessage} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={() => navigate("detail")} />}
-        {view === "game" && activeCheckpoint && (
+      <main ref={mainRef} id="main-content" tabIndex={-1}>
+        {view === "discover" && <Discover routesForSale={catalogRoutes} onDetail={openRouteDetail} onBuy={openPurchase} />}
+        {view === "detail" && <RouteDetail route={selectedRoute} owned={auth.profile?.role === "superadmin" || ownedRouteIds.includes(selectedRoute.id)} onBack={() => navigate("discover")} onBuy={() => openPurchase("route", selectedRoute)} onStart={() => startGame(selectedRoute.id)} />}
+        {view === "library" && <Library routes={ownedPlayableRoutes} progress={displayProgress} progressRouteId={publishedGame.session?.routeId ?? pilotRouteId} notice={gameMessage} onDiscover={() => navigate("discover")} onStart={startGame} onDetail={openRouteDetail} />}
+        {protectedViewPending && <section className="page section-wrap" aria-live="polite"><div className="loading-shell"><span className="loader-mark">Š</span><p>Ověřujeme rozehranou výpravu…</p></div></section>}
+        {view === "game" && protectedViewReady && activeCheckpoint && (
           <Game
             checkpoint={activeCheckpoint}
             totalCheckpoints={totalCheckpoints}
@@ -566,8 +647,8 @@ export default function Home() {
             onExit={() => navigate("library")}
           />
         )}
-        {view === "game" && !activeCheckpoint && <section className="page section-wrap"><div className="empty-state"><span>!</span><h2>Checkpoint se nepodařilo načíst</h2><p>{gameMessage || "Vrať se do knihovny a spusť publikovanou trasu znovu."}</p><button className="button primary" onClick={() => navigate("library")}>Zpět do knihovny</button></div></section>}
-        {view === "finish" && (
+        {view === "game" && protectedViewReady && publishedGame.session && !activeCheckpoint && <section className="page section-wrap"><div className="empty-state"><span>!</span><h2>Checkpoint se nepodařilo načíst</h2><p>{gameMessage || "Vrať se do knihovny a spusť publikovanou trasu znovu."}</p><button className="button primary" onClick={() => navigate("library")}>Zpět do knihovny</button></div></section>}
+        {view === "finish" && protectedViewReady && currentGameCompleted && (
           <Finish
             hintsUsed={state.progress.hintsUsed}
             totalCheckpoints={totalCheckpoints}
@@ -585,7 +666,7 @@ export default function Home() {
         )}
         {view === "activity" && <ActivityView activities={activities} />}
         {view === "profile" && <ProfileExperience auth={auth} completed={completed} activities={activities} badges={earnedBadges} onLogin={() => { setResumeCheckout(false); setAuthMode("signin"); setModal("login"); }} onRegister={() => { setResumeCheckout(false); setAuthMode("signup"); setModal("login"); }} />}
-        {view === "admin" && <AdminCenter auth={auth} />}
+        {view === "admin" && <Suspense fallback={<section className="page section-wrap"><div className="loading-shell"><span className="loader-mark">Š</span><p>Otevíráme správu…</p></div></section>}><AdminCenter auth={auth} /></Suspense>}
         {view === "partners" && <PartnerSection />}
         {view === "contact" && <ContactSection auth={auth} />}
       </main>
@@ -606,22 +687,23 @@ export default function Home() {
 }
 
 function NavButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return <button className={active ? "nav-active" : ""} onClick={onClick}>{children}</button>;
+  return <button className={active ? "nav-active" : ""} onClick={onClick} aria-current={active ? "page" : undefined}>{children}</button>;
 }
 
 function BottomButton({ icon, label, active, onClick }: { icon: string; label: string; active: boolean; onClick: () => void }) {
-  return <button className={active ? "active" : ""} onClick={onClick}><span>{icon}</span><b>{label}</b></button>;
+  return <button className={active ? "active" : ""} onClick={onClick} aria-current={active ? "page" : undefined}><span>{icon}</span><b>{label}</b></button>;
 }
 
-function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSummary[]; onDetail: () => void; onBuy: (item: "route" | "bundle", route?: RouteSummary) => void }) {
+function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSummary[]; onDetail: (route: RouteSummary) => void; onBuy: (item: "route" | "bundle", route?: RouteSummary) => void }) {
   const [routeFilter, setRouteFilter] = useState("all");
   const bundleListPrice = bundle.routeIds.reduce(
     (total, routeId) => total + (routesForSale.find((route) => route.id === routeId)?.price ?? 0),
     0,
   );
   const bundleSavings = bundleListPrice - bundle.price;
-  const bundleReady = bundle.routeIds.every((routeId) => routesForSale.find((route) => route.id === routeId)?.status === "active");
-  const activeRouteCount = routesForSale.filter((route) => route.status === "active").length;
+  const bundleReady = commerciallyReleasedBundleIds.includes(bundle.id)
+    && bundle.routeIds.every((routeId) => canPurchasePublishedRoute(routesForSale.find((route) => route.id === routeId), commerciallyReleasedRouteIds));
+  const activeRouteCount = routesForSale.filter((route) => canPurchasePublishedRoute(route, commerciallyReleasedRouteIds)).length;
   const upcomingRouteCount = routesForSale.filter((route) => route.status === "coming").length;
   const seasonalRouteCount = routesForSale.filter((route) => route.status === "seasonal").length;
   const districtFilters = Array.from(new Set(routesForSale.filter((route) => route.status !== "seasonal").map((route) => route.district)));
@@ -639,7 +721,7 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
           <h1>Město není kulisa.<br /><em>Je to šifra.</em></h1>
           <p>Vyraz pěšky, rozlušti příběhy ukryté v ulicích a objev Brno tak, jak ho neznají ani místní.</p>
           <div className="hero-actions">
-            <button className="button primary" onClick={onDetail}>Vybrat první trasu <span>→</span></button>
+            <button className="button primary" onClick={() => { const firstRoute = routesForSale.find((route) => route.id === pilotRouteId) ?? routesForSale[0]; if (firstRoute) onDetail(firstRoute); }}>Vybrat první trasu <span>→</span></button>
             <button className="text-button" onClick={() => document.getElementById("jak-to-funguje")?.scrollIntoView({ behavior: "smooth" })}>Jak to funguje <span>↓</span></button>
           </div>
           <div className="hero-proof">
@@ -647,18 +729,13 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
             <div><b>Pilotní výprava v Králově Poli</b><small>první trasa připravená k ověření</small></div>
           </div>
         </div>
-        <div className="hero-map" aria-label="Stylizovaná mapa Králova Pole">
-          <div className="contour contour-a" /><div className="contour contour-b" /><div className="contour contour-c" />
-          <div className="street street-a" /><div className="street street-b" /><div className="street street-c" /><div className="street street-d" />
-          <span className="map-label label-one">PALACKÉHO TŘÍDA</span><span className="map-label label-two">KRÁLOVO POLE</span>
-          <div className="route-line route-line-a" /><div className="route-line route-line-b" /><div className="route-line route-line-c" />
-          <span className="map-pin pin-one">1</span><span className="map-pin pin-two">2</span><span className="map-pin pin-three">?</span>
+        <div className="hero-map" aria-label="Geograficky věrná ilustrovaná mapa Brna s oblastí pilotní trasy">
+          <BrnoIllustratedMap routes={[{ district: "Královo Pole", routeCount: 1, hasActive: true, isSeasonal: false }]} selectedDistrict="Královo Pole" variant="hero" />
           <div className="route-ticket">
             <span className="ticket-kicker">TRASA 01 · BRNO</span>
             <b>Stopy<br />proměny</b>
             <div><span>4,1 km</span><span>5 stop</span></div>
           </div>
-          <div className="compass"><b>N</b><span>✦</span></div>
         </div>
       </section>
 
@@ -675,7 +752,7 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
         <button className={routeFilter === "seasonal" ? "active" : ""} aria-pressed={routeFilter === "seasonal"} onClick={() => setRouteFilter("seasonal")}>Vánoční a sezónní</button>
       </div>
 
-      <CityRouteMap routes={filteredRoutes} onBuy={(route) => onBuy("route", route)} />
+      <CityRouteMap routes={filteredRoutes} releasedRouteIds={commerciallyReleasedRouteIds} onBuy={(route) => onBuy("route", route)} onDetail={onDetail} />
 
       <section className="routes-section section-wrap">
         <div className="section-heading">
@@ -683,7 +760,7 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
           <span className="route-count">{activeRouteCount} aktivní · {upcomingRouteCount} připravujeme · {seasonalRouteCount} sezónní</span>
         </div>
         <div className="route-grid">
-          {filteredRoutes.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={onDetail} />)}
+          {filteredRoutes.map((route, index) => <RouteCard key={route.id} route={route} index={index + 1} onDetail={() => onDetail(route)} />)}
         </div>
       </section>
 
@@ -708,7 +785,7 @@ function Discover({ routesForSale, onDetail, onBuy }: { routesForSale: RouteSumm
 }
 
 function RouteCard({ route, index, onDetail }: { route: RouteSummary; index: number; onDetail: () => void }) {
-  const active = route.status === "active";
+  const active = canPurchasePublishedRoute(route, commerciallyReleasedRouteIds);
   return (
     <article className={`route-card ${route.accent} ${!active ? "muted" : ""}`}>
       <div className="route-visual">
@@ -724,38 +801,41 @@ function RouteCard({ route, index, onDetail }: { route: RouteSummary; index: num
         <p>{route.tagline}</p>
         <RouteSuitabilityBadges strollerStatus={route.strollerStatus} preschoolStatus={route.preschoolStatus} durationMaxMinutes={route.durationMaxMinutes} />
         <div className="route-stats"><span><small>Vzdálenost</small><b>{route.distance} km</b></span><span><small>Čas</small><b>{route.duration}</b></span><span><small>Obtížnost</small><b>{route.difficulty}</b></span></div>
-        <div className="route-card-footer"><strong>{active ? `${route.price} Kč` : route.status === "seasonal" ? route.available : "Již brzy"}</strong><button disabled={!active} onClick={onDetail} aria-label={`Detail trasy ${route.title}`}>{active ? "Prozkoumat →" : "Upozornit mě"}</button></div>
+        <div className="route-card-footer"><strong>{active ? `${route.price} Kč` : route.status === "seasonal" ? route.available : "Již brzy"}</strong><button onClick={onDetail} aria-label={`Detail trasy ${route.title}`}>{active ? "Prozkoumat →" : "Prohlédnout koncept →"}</button></div>
       </div>
     </article>
   );
 }
 
 function RouteDetail({ route, owned, onBack, onBuy, onStart }: { route: RouteSummary; owned: boolean; onBack: () => void; onBuy: () => void; onStart: () => void | Promise<void> }) {
+  const playable = canStartPublishedGame(route, commerciallyReleasedRouteIds);
+  const isPilot = route.id === pilotRouteId;
+  const previewCount = Math.min(route.checkpoints, 3);
   return (
     <section className="detail-page">
       <div className="detail-hero">
         <button className="back-button" onClick={onBack}>← Zpět na trasy</button>
         <div className="detail-hero-grid section-wrap">
           <div className="detail-copy">
-            <span className="eyebrow light"><span /> BRNO · KRÁLOVO POLE</span>
-            <h1>Stopy<br /><em>proměny</em></h1>
-            <p>Poskládej pět ztracených listů kroniky a odhal, jak se z vesnice za hradbami stala sebevědomá městská čtvrť.</p>
+            <span className="eyebrow light"><span /> BRNO · {route.district.toUpperCase()}</span>
+            <h1>{route.title}</h1>
+            <p>{isPilot ? "Poskládej pět ztracených listů kroniky a odhal, jak se z vesnice za hradbami stala sebevědomá městská čtvrť." : route.tagline}</p>
             <div className="detail-tags"><span>{route.distance} km</span><span>{route.duration}</span><span>{route.checkpoints} checkpointů</span><span>{route.difficulty}</span></div>
             <RouteSuitabilityBadges strollerStatus={route.strollerStatus} preschoolStatus={route.preschoolStatus} durationMaxMinutes={route.durationMaxMinutes} />
           </div>
-          <div className="detail-map"><div className="map-path" />{routePreviewStops.map((cp) => <span key={cp.id} style={{ left: `${cp.map.x}%`, top: `${cp.map.y}%` }}>{cp.order === 1 ? "1" : "?"}</span>)}<b>KRÁLOVO<br />POLE</b></div>
+          <div className="detail-map"><BrnoIllustratedMap routes={[{ district: route.mapDistrict ?? route.district, routeCount: 1, hasActive: playable, isSeasonal: route.status === "seasonal" }]} selectedDistrict={route.mapDistrict ?? route.district} variant="detail" /></div>
         </div>
       </div>
       <div className="detail-content section-wrap">
         <div className="story-column">
-          <span className="section-label">Tvůj úkol</span><h2>Kronika má pět prázdných stran</h2>
-          <p className="lead">Někdo z ní vytrhl klíčové okamžiky. Zůstaly jen šifry rozeseté od Semilassa až ke staré strojírně. Najdi je dřív, než stopy zmizí.</p>
-          <div className="checkpoint-preview">{routePreviewStops.map((cp, index) => <div key={cp.id}><span>{index === 0 ? "⌖" : "?"}</span><div><b>{index === 0 ? cp.title : `Stopa ${index + 1} je skrytá`}</b><small>{index === 0 ? "Start výpravy" : "Odemkne se během hry"}</small></div></div>)}</div>
+          <span className="section-label">{playable ? "Tvůj úkol" : "Pracovní koncept"}</span><h2>{isPilot ? "Kronika má pět prázdných stran" : `Příběh čtvrti ${route.district} právě ověřujeme`}</h2>
+          <p className="lead">{isPilot ? "Někdo z ní vytrhl klíčové okamžiky. Zůstaly jen šifry rozeseté od Semilassa až ke staré strojírně. Najdi je dřív, než stopy zmizí." : "Trasu zveřejníme teprve po ověření všech míst, přístupnosti, bezpečnosti a řešitelnosti úkolů přímo v terénu. Do té doby si můžeš prohlédnout její plánované parametry."}</p>
+          <div className="checkpoint-preview">{isPilot ? routePreviewStops.map((cp, index) => <div key={cp.id}><span>{index === 0 ? "⌖" : "?"}</span><div><b>{index === 0 ? cp.title : `Stopa ${index + 1} je skrytá`}</b><small>{index === 0 ? "Start výpravy" : "Odemkne se během hry"}</small></div></div>) : Array.from({ length: previewCount }, (_, index) => <div key={`${route.id}-preview-${index}`}><span>?</span><div><b>{`Plánovaná stopa ${index + 1}`}</b><small>Přesné místo zveřejníme až po terénním ověření</small></div></div>)}</div>
         </div>
         <aside className="purchase-card">
-          <div className="purchase-top"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{owned ? "Zakoupeno" : `${route.price} Kč`}</strong><small>Jednorázově · bez předplatného</small></div>
-          <button className="button primary full" onClick={owned ? onStart : onBuy}>{owned ? "Vyrazit na trasu →" : "Koupit trasu →"}</button>
-          <ul><li>✓ Hraješ vlastním tempem</li><li>✓ 2 úrovně nápovědy</li><li>✓ Přístup bez časového omezení</li><li>✓ Odznak Král KrPole</li></ul>
+          <div className="purchase-top"><span>TRASA PRO {demoRoute.teamSize.min}–{demoRoute.teamSize.max} HRÁČŮ</span><strong>{playable && owned ? "Zakoupeno" : `${route.price} Kč`}</strong><small>{playable ? "Jednorázově · bez předplatného" : "Plánovaná cena · zatím bez prodeje"}</small></div>
+          <button className="button primary full" onClick={playable ? (owned ? onStart : onBuy) : undefined} disabled={!playable}>{playable ? (owned ? "Vyrazit na trasu →" : "Koupit trasu →") : "Čeká na terénní ověření"}</button>
+          <ul><li>✓ Hraješ vlastním tempem</li><li>✓ Nápovědy přímo v aplikaci</li><li>✓ Postupné odkrývání míst</li><li>✓ Památeční odznak po dokončení</li></ul>
           <div className="gear"><b>Co s sebou?</b><p>Nabitý telefon, pohodlné boty, tužku a chuť dívat se kolem sebe.</p></div>
         </aside>
       </div>
@@ -763,22 +843,25 @@ function RouteDetail({ route, owned, onBack, onBuy, onStart }: { route: RouteSum
   );
 }
 
-function Library({ owned, progress, totalCheckpoints, notice, onDiscover, onStart, onDetail }: { owned: boolean; progress: RouteProgress; totalCheckpoints: number; notice: string; onDiscover: () => void; onStart: () => void | Promise<void>; onDetail: () => void }) {
-  const percent = progress.completed ? 100 : Math.round((progress.current / Math.max(totalCheckpoints, 1)) * 100);
+function Library({ routes: ownedRoutes, progress, progressRouteId, notice, onDiscover, onStart, onDetail }: { routes: RouteSummary[]; progress: RouteProgress; progressRouteId: string; notice: string; onDiscover: () => void; onStart: (routeId: string) => void | Promise<void>; onDetail: (route: RouteSummary) => void }) {
   return (
     <section className="page section-wrap">
       <div className="page-heading"><span className="section-label">Tvoje sbírka</span><h1>Moje hry</h1><p>Zakoupené a rozehrané výpravy máš vždy po ruce.</p></div>
       {notice && <p className="form-message error" role="alert">{notice}</p>}
-      {!owned ? (
+      {ownedRoutes.length === 0 ? (
         <div className="empty-state"><span>◇</span><h2>Batoh je zatím prázdný</h2><p>Vyber si první trasu a začni sbírat městské stopy.</p><button className="button primary" onClick={onDiscover}>Objevit trasy →</button></div>
       ) : (
-        <div className="owned-card">
-          <div className="owned-visual"><span>01</span><div className="owned-pin">⌖</div></div>
-          <div className="owned-copy"><span className="district">BRNO · KRÁLOVO POLE</span><h2>Stopy proměny</h2><p>{progress.completed ? "Výprava dokončena. Kronika je kompletní." : progress.current > 0 ? `Čeká na tebe stopa ${progress.current + 1} z ${totalCheckpoints}.` : "Vše je připraveno. První stopa čeká u Semilassa."}</p>
-            <div className="progress-row"><div><i style={{ width: `${percent}%` }} /></div><span>{percent} %</span></div>
-            <div className="owned-actions"><button className="button primary" onClick={onStart}>{progress.completed ? "Projít znovu" : progress.current > 0 ? "Pokračovat ve hře →" : "Zahájit výpravu →"}</button><button className="text-button dark" onClick={onDetail}>Detail trasy</button></div>
-          </div>
-        </div>
+        <div className="owned-routes">{ownedRoutes.map((route, index) => {
+          const routeProgress = route.id === progressRouteId ? progress : { current: 0, solved: [], hintsUsed: 0, completed: false };
+          const percent = routeProgress.completed ? 100 : Math.round((routeProgress.current / Math.max(route.checkpoints, 1)) * 100);
+          return <article className="owned-card" key={route.id}>
+            <div className="owned-visual"><span>{String(index + 1).padStart(2, "0")}</span><div className="owned-pin">⌖</div></div>
+            <div className="owned-copy"><span className="district">BRNO · {route.district.toUpperCase()}</span><h2>{route.title}</h2><p>{routeProgress.completed ? "Výprava dokončena. Zápis je uložený v městském pasu." : routeProgress.current > 0 ? `Čeká na tebe stopa ${routeProgress.current + 1} z ${route.checkpoints}.` : "Vše je připraveno. První stopa čeká na odhalení."}</p>
+              <div className="progress-row"><div><i style={{ width: `${percent}%` }} /></div><span>{percent} %</span></div>
+              <div className="owned-actions"><button className="button primary" onClick={() => void onStart(route.id)}>{routeProgress.completed ? "Projít znovu" : routeProgress.current > 0 ? "Pokračovat ve hře →" : "Zahájit výpravu →"}</button><button className="text-button dark" onClick={() => onDetail(route)}>Detail trasy</button></div>
+            </div>
+          </article>;
+        })}</div>
       )}
     </section>
   );
@@ -789,7 +872,7 @@ function Game({ checkpoint, totalCheckpoints, solvedCount, earnedMetaTokens, mes
 }) {
   return (
     <section className="game-page">
-      <div className="game-topbar"><button onClick={onExit}>×</button><div><span>STOPY PROMĚNY</span><div><i style={{ width: `${(solvedCount / Math.max(totalCheckpoints, 1)) * 100}%` }} /></div></div><b>{checkpoint.order}/{totalCheckpoints}</b></div>
+      <div className="game-topbar"><button onClick={onExit} aria-label="Ukončit herní režim a vrátit se do knihovny">×</button><div><span>STOPY PROMĚNY</span><div><i style={{ width: `${(solvedCount / Math.max(totalCheckpoints, 1)) * 100}%` }} /></div></div><b>{checkpoint.order}/{totalCheckpoints}</b></div>
       <div className="game-layout">
         <div className="game-map-panel">
           <CheckpointMap title={checkpoint.title} coordinates={checkpoint.coordinates} />
@@ -831,9 +914,9 @@ function Finish({ hintsUsed, totalCheckpoints, proofMode, setProofMode, photo, o
       <div className="badge-award"><div className="big-badge"><span>♛</span><i>KRÁL<br />KRPOLE</i></div><div><span className="section-label">Nový odznak</span><h2>Král KrPole</h2><p>Za kompletní rozluštění pěti stop proměny Králova Pole.</p></div></div>
       <div className="proof-card">
         <div className="proof-heading"><div><span className="section-label">Zanech stopu</span><h2>Jak si výpravu zapamatuješ?</h2></div><p>Volitelné · zůstává jen v tomto zařízení</p></div>
-        <div className="proof-tabs"><button className={proofMode === "photo" ? "active" : ""} onClick={() => setProofMode("photo")}>▣ Selfie</button><button className={proofMode === "signature" ? "active" : ""} onClick={() => setProofMode("signature")}>〽 Podpis</button><button className={proofMode === "skip" ? "active" : ""} onClick={() => setProofMode("skip")}>Přeskočit</button></div>
-        {proofMode === "photo" && <label className="photo-drop">{photo ? <img src={photo} alt="Lokální náhled selfie" /> : <><span>＋</span><b>Přidat vítěznou selfie</b><small>Fotka se nikam neodesílá</small></>}<input type="file" accept="image/*" capture="user" onChange={onPhoto} /></label>}
-        {proofMode === "signature" && <div className="signature-wrap"><canvas ref={canvasRef} width="600" height="220" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} aria-label="Plocha pro digitální podpis" /><button onClick={onClear}>Smazat podpis</button></div>}
+        <div className="proof-tabs" role="group" aria-label="Forma památky z výpravy"><button aria-pressed={proofMode === "photo"} className={proofMode === "photo" ? "active" : ""} onClick={() => setProofMode("photo")}>▣ Selfie</button><button aria-pressed={proofMode === "signature"} className={proofMode === "signature" ? "active" : ""} onClick={() => setProofMode("signature")}>〽 Podpis</button><button aria-pressed={proofMode === "skip"} className={proofMode === "skip" ? "active" : ""} onClick={() => setProofMode("skip")}>Bez potvrzení</button></div>
+        {proofMode === "photo" && <label className="photo-drop">{photo ? <img src={photo} alt="Lokální náhled selfie" /> : <><span>＋</span><b>Přidat vítěznou selfie</b><small>Fotka se nikam neodesílá</small></>}<input type="file" accept="image/*" capture="user" onChange={onPhoto} aria-label="Vybrat vítěznou selfie" /></label>}
+        {proofMode === "signature" && <div className="signature-wrap"><p>Podpis je volitelný. Pokud kreslení nepoužíváš, zvol „Bez potvrzení“.</p><canvas ref={canvasRef} width="600" height="220" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp} role="img" aria-label="Plocha pro volitelný digitální podpis kreslený prstem" /><button onClick={onClear}>Smazat podpis</button></div>}
         {proofMode === "skip" && <div className="skip-proof"><span>✓</span><p>Žádný problém. Výsledek a odznak se uloží i bez fotografie nebo podpisu.</p></div>}
         <div className="privacy-note">◎ V pilotu zůstává vše jen ve tvém prohlížeči. Nic neodesíláme ani nepoužíváme pro marketing.</div>
       </div>

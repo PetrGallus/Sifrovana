@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const [helper, routeContent, routePortfolio, page, productSections, cms, publishedGame, migration] = await Promise.all([
+const [helper, routeContent, routePortfolio, page, routeCatalog, productSections, cms, publishedGame, migration] = await Promise.all([
   readFile(new URL("../lib/route-suitability.ts", import.meta.url), "utf8"),
   readFile(new URL("../lib/route-content.ts", import.meta.url), "utf8"),
   readFile(new URL("../lib/route-portfolio.ts", import.meta.url), "utf8"),
   readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+  readFile(new URL("../lib/route-catalog.ts", import.meta.url), "utf8"),
   readFile(new URL("../app/product-sections.tsx", import.meta.url), "utf8"),
   readFile(new URL("../app/route-cms.tsx", import.meta.url), "utf8"),
   readFile(new URL("../lib/supabase/published-game.ts", import.meta.url), "utf8"),
@@ -31,7 +32,8 @@ test("keeps stroller and preschool suitability explicit and conservative", () =>
 });
 
 test("propagates route badges through catalogue, map, CMS, and published game", () => {
-  assert.match(page, /duration_min_minutes,duration_max_minutes,stroller_status,preschool_status/);
+  assert.match(page, /PUBLIC_ROUTE_CATALOG_SELECT/);
+  assert.match(routeCatalog, /duration_min_minutes,duration_max_minutes,stroller_status,preschool_status/);
   assert.match(page, /<RouteSuitabilityBadges/);
   assert.match(productSections, /<RouteSuitabilityBadges/);
   assert.match(cms, /stroller_status: RouteStrollerStatus/);

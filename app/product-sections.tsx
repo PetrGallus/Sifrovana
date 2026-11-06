@@ -2,14 +2,14 @@
 
 /* eslint-disable @next/next/no-img-element -- The payment QR is generated as an in-memory data URL. */
 
-import QRCode from "qrcode";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "../lib/supabase/client";
 import type { RoutePreschoolStatus, RouteStrollerStatus } from "../lib/route-suitability";
-import { DiscountAdmin } from "./discount-admin";
-import { RouteCms } from "./route-cms";
+import { canPurchasePublishedRoute } from "../lib/route-playability";
+import { BrnoIllustratedMap } from "./brno-illustrated-map";
 import { RouteSuitabilityBadges } from "./route-suitability-badges";
+import { useAccessibleModal } from "./use-accessible-modal";
 
 export type UserRole = "user" | "route_manager" | "superadmin";
 
@@ -28,6 +28,7 @@ export type AppProfile = {
 export type RouteSummary = {
   id: string;
   district: string;
+  mapDistrict?: string;
   title: string;
   tagline: string;
   price: number;
@@ -42,6 +43,8 @@ export type RouteSummary = {
   status: "active" | "coming" | "seasonal";
   accent: string;
   available?: string;
+  availableFrom?: string;
+  availableTo?: string;
   mapX: number;
   mapY: number;
 };
@@ -82,18 +85,33 @@ export function useSifrovanaAuth(): AuthController {
       return;
     }
 
-    supabase.auth.getSession().then(async ({ data }) => {
-      setSession(data.session);
-      await loadProfile(data.session?.user ?? null);
-      setLoading(false);
-    });
+    let active = true;
+    void (async () => {
+      try {
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        if (!active) return;
+        setSession(data.session);
+        await loadProfile(data.session?.user ?? null);
+      } catch {
+        if (active) {
+          setSession(null);
+          setProfile(null);
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
 
     const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
       setRecoveryMode(event === "PASSWORD_RECOVERY");
       window.setTimeout(() => void loadProfile(nextSession?.user ?? null), 0);
     });
-    return () => listener.subscription.unsubscribe();
+    return () => {
+      active = false;
+      listener.subscription.unsubscribe();
+    };
   }, [loadProfile, supabase]);
 
   return {
@@ -120,6 +138,7 @@ export function AuthModal({ auth, initialMode = "signin", onClose, onAuthenticat
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
+  const dialogRef = useAccessibleModal(onClose);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -172,11 +191,11 @@ export function AuthModal({ auth, initialMode = "signin", onClose, onAuthenticat
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+      <div ref={dialogRef} className="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" tabIndex={-1}>
         <button className="modal-close" onClick={onClose} aria-label="Zavřít">×</button>
         <span className="modal-symbol">Š</span>
         <span className="section-label">Skutečný účet</span>
-        <h2 id="auth-title">{mode === "signin" ? "Vítej zpátky ve hře" : mode === "signup" ? "Zapiš se do kroniky" : mode === "reset" ? "Obnov si přístup" : "Nastav nové heslo"}</h2>
+        <h2 id="auth-title" tabIndex={-1} data-modal-autofocus>{mode === "signin" ? "Vítej zpátky ve hře" : mode === "signup" ? "Zapiš se do kroniky" : mode === "reset" ? "Obnov si přístup" : "Nastav nové heslo"}</h2>
         <p>{mode === "signup" ? "Účet uloží zakoupené trasy, rozehraný postup i razítka v městském pasu." : "Přihlášení je zabezpečené a heslo aplikace nikdy neukládá."}</p>
         {!isSupabaseConfigured() && <p className="form-message error">Chybí připojení autentizační služby.</p>}
         <form onSubmit={submit}>
@@ -213,36 +232,50 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
   const price = kind === "route" ? route.price : 999;
   const routeCount = kind === "route" ? 1 : Math.min(3, routes.length);
   const title = kind === "route" ? `${route.district}: ${route.title}` : "Balíček 3 tras";
+  const paymentIban = process.env.NEXT_PUBLIC_PAYMENT_IBAN?.replace(/\s/g, "") || null;
+  const dialogRef = useAccessibleModal(onClose);
 
   async function createOrder() {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !auth.user) return;
+    if (!paymentIban) {
+      setError("Platební účet není nakonfigurovaný. Objednávku proto zatím nelze vytvořit.");
+      return;
+    }
     if (kind !== "route") {
       setError("Balíček bude možné koupit po publikaci všech zahrnutých tras.");
       return;
     }
     setBusy(true);
     setError("");
-    const { data, error: orderError } = await supabase.rpc("create_route_checkout_order", {
-      p_route_id: route.id,
-      p_discount_code: couponCode.trim() || null,
-    });
-    if (orderError || !data) {
-      setError(orderError?.message ?? "Objednávku se nepodařilo vytvořit.");
-      setBusy(false);
-      return;
-    }
-    const created = data as { order_id: string; variable_symbol: string; amount_czk: number; gross_amount_czk: number; discount_amount_czk: number };
+    try {
+      const { data, error: orderError } = await supabase.rpc("create_route_checkout_order", {
+        p_route_id: route.id,
+        p_discount_code: couponCode.trim() || null,
+      });
+      if (orderError || !data) {
+        setError(orderError?.message ?? "Objednávku se nepodařilo vytvořit.");
+        return;
+      }
+      const created = data as { order_id: string; variable_symbol: string; amount_czk: number; gross_amount_czk: number; discount_amount_czk: number };
 
-    const iban = process.env.NEXT_PUBLIC_PAYMENT_IBAN?.replace(/\s/g, "");
-    let qr: string | null = null;
-    if (iban) {
-      const spd = `SPD*1.0*ACC:${iban}*AM:${created.amount_czk.toFixed(2)}*CC:CZK*X-VS:${created.variable_symbol}*MSG:SIFROVANA`;
-      qr = await QRCode.toDataURL(spd, { margin: 1, width: 280, color: { dark: "#0e3b3a", light: "#fffdf7" } });
+      let qr: string | null = null;
+      if (paymentIban) {
+        try {
+          const { default: QRCode } = await import("qrcode");
+          const spd = `SPD*1.0*ACC:${paymentIban}*AM:${created.amount_czk.toFixed(2)}*CC:CZK*X-VS:${created.variable_symbol}*MSG:SIFROVANA`;
+          qr = await QRCode.toDataURL(spd, { margin: 1, width: 280, color: { dark: "#0e3b3a", light: "#fffdf7" } });
+        } catch {
+          setError("Objednávka vznikla, ale platební QR se nepodařilo vykreslit. Použij údaje pro ruční převod.");
+        }
+      }
+      setOrder({ id: created.order_id, variableSymbol: created.variable_symbol, qr, amount: created.amount_czk, gross: created.gross_amount_czk, discount: created.discount_amount_czk });
+      onCreated();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Objednávku se nepodařilo vytvořit.");
+    } finally {
+      setBusy(false);
     }
-    setOrder({ id: created.order_id, variableSymbol: created.variable_symbol, qr, amount: created.amount_czk, gross: created.gross_amount_czk, discount: created.discount_amount_czk });
-    setBusy(false);
-    onCreated();
   }
 
   async function cancelOrder() {
@@ -258,19 +291,20 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="modal checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title">
+      <div ref={dialogRef} className="modal checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" tabIndex={-1}>
         <button className="modal-close" onClick={onClose} aria-label="Zavřít">×</button>
-        <span className="section-label">Jedna licence pro celý tým</span><h2 id="checkout-title">{order ? "Objednávka čeká na platbu" : "Ještě jeden krok a vyrážíte"}</h2>
+        <span className="section-label">Jedna licence pro celý tým</span><h2 id="checkout-title" tabIndex={-1} data-modal-autofocus>{order ? "Objednávka čeká na platbu" : "Ještě jeden krok a vyrážíte"}</h2>
         {!order ? <>
           <div className="checkout-item"><span>{kind === "route" ? "01" : "3×"}</span><div><small>{kind === "route" ? "TRASA" : "BALÍČEK"}</small><b>{title}</b><p>Pro tým 1–5 lidí · {routeCount} {routeCount === 1 ? "trasa" : "trasy"}</p></div><strong>{price} Kč</strong></div>
           <div className="checkout-benefits"><span>✓ Start kdykoliv</span><span>✓ Bez instalace</span><span>✓ Pauza a návrat</span></div>
           <label className="checkout-coupon">Slevový kupón <small>(nepovinné)</small><div><input value={couponCode} onChange={(event) => setCouponCode(event.target.value.toUpperCase())} autoCapitalize="characters" autoComplete="off" spellCheck={false} placeholder="Např. PODZIM20" /><span>Ověří se bezpečně při vytvoření objednávky</span></div></label>
           <div className="checkout-total"><span>Celkem za tým</span><strong>{price} Kč</strong></div>
-          {error && <p className="form-message error">{error}</p>}
-          <button className="button primary full" onClick={createOrder} disabled={busy}>{busy ? "Vytvářím objednávku…" : "Vygenerovat QR pro tým →"}</button>
+          {!paymentIban && <p className="form-message error" role="alert">Platební účet zatím není nakonfigurovaný. Objednávka se nevytvoří a nic se nerezervuje.</p>}
+          {error && <p className="form-message error" role="alert">{error}</p>}
+          <button className="button primary full" onClick={createOrder} disabled={busy || !paymentIban}>{busy ? "Vytvářím objednávku…" : paymentIban ? "Vygenerovat QR pro tým →" : "Platba zatím není dostupná"}</button>
         </> : <div className="qr-payment">
-          {order.qr ? <img src={order.qr} alt={`QR platba ${order.amount} Kč, variabilní symbol ${order.variableSymbol}`} /> : <div className="qr-placeholder"><b>QR bude aktivní po doplnění účtu</b><small>V administraci hostingu chybí veřejný IBAN příjemce.</small></div>}
-          <div><small>Částka</small><b>{order.amount} Kč</b>{order.discount > 0 && <><small>Původní cena</small><b>{order.gross} Kč</b><small>Slevový kupón</small><b>− {order.discount} Kč</b></>}<small>Variabilní symbol</small><b>{order.variableSymbol}</b></div>
+          {order.qr ? <img src={order.qr} alt={`QR platba ${order.amount} Kč, variabilní symbol ${order.variableSymbol}`} /> : <div className="qr-placeholder"><b>Použij ruční bankovní převod</b><small>Platební QR není v tomto prohlížeči nebo prostředí dostupné.</small></div>}
+          <div><small>Částka</small><b>{order.amount} Kč</b>{order.discount > 0 && <><small>Původní cena</small><b>{order.gross} Kč</b><small>Slevový kupón</small><b>− {order.discount} Kč</b></>}<small>Variabilní symbol</small><b>{order.variableSymbol}</b><small>IBAN příjemce</small><b>{paymentIban ?? "zatím nenastaven"}</b></div>
           <p>Po potvrzení platby se trasa odemkne celému vašemu týmu. Začít můžete, až se vám to bude hodit.</p>
           <button className="button primary full" onClick={onClose}>Hotovo</button>
           <button className="reset-button" onClick={() => void cancelOrder()} disabled={busy}>{busy ? "Ruším…" : "Zrušit tuto objednávku"}</button>
@@ -281,33 +315,39 @@ export function CheckoutModal({ auth, kind, route, routes, onClose, onCreated }:
   );
 }
 
-export function CityRouteMap({ routes, onBuy }: { routes: RouteSummary[]; onBuy: (route: RouteSummary) => void }) {
+export function CityRouteMap({ routes, releasedRouteIds, onBuy, onDetail }: { routes: RouteSummary[]; releasedRouteIds: readonly string[]; onBuy: (route: RouteSummary) => void; onDetail: (route: RouteSummary) => void }) {
   const [selectedId, setSelectedId] = useState(routes[0]?.id ?? "");
   const selected = routes.find((route) => route.id === selectedId) ?? routes[0];
   const districtGroups = useMemo(() => {
     const grouped = new Map<string, RouteSummary[]>();
-    routes.forEach((route) => grouped.set(route.district, [...(grouped.get(route.district) ?? []), route]));
+    routes.forEach((route) => {
+      const mapDistrict = route.mapDistrict ?? route.district;
+      grouped.set(mapDistrict, [...(grouped.get(mapDistrict) ?? []), route]);
+    });
     return [...grouped.entries()].map(([district, districtRoutes]) => ({
       district,
       routes: districtRoutes,
-      mapX: districtRoutes.reduce((sum, route) => sum + route.mapX, 0) / districtRoutes.length,
-      mapY: districtRoutes.reduce((sum, route) => sum + route.mapY, 0) / districtRoutes.length,
+      routeCount: districtRoutes.length,
+      hasActive: districtRoutes.some((route) => canPurchasePublishedRoute(route, releasedRouteIds)),
+      isSeasonal: districtRoutes.every((route) => route.status === "seasonal"),
     }));
-  }, [routes]);
+  }, [releasedRouteIds, routes]);
   if (!selected) return null;
-  const selectedDistrictRoutes = districtGroups.find((group) => group.district === selected.district)?.routes ?? [selected];
+  const selectedMapDistrict = selected.mapDistrict ?? selected.district;
+  const selectedDistrictRoutes = districtGroups.find((group) => group.district === selectedMapDistrict)?.routes ?? [selected];
+  const purchasable = canPurchasePublishedRoute(selected, releasedRouteIds);
 
   return (
     <section className="city-route-map section-wrap" aria-label="Interaktivní mapa tras v Brně">
       <div className="city-map-canvas">
-        <span className="map-river river-one" /><span className="map-river river-two" />
-        <b className="city-map-title">BRNO</b>
-        {districtGroups.map((group) => {
-          const isSelected = group.district === selected.district;
-          const groupHasActiveRoute = group.routes.some((route) => route.status === "active");
-          const groupIsSeasonal = group.routes.every((route) => route.status === "seasonal");
-          return <button key={group.district} className={`district-pin ${isSelected ? "selected" : ""}`} style={{ left: `${group.mapX}%`, top: `${group.mapY}%` }} onClick={() => setSelectedId(group.routes[0].id)} aria-label={`${group.district}: ${group.routes.length} ${group.routes.length === 1 ? "trasa" : "trasy"}`}><span>{groupHasActiveRoute ? "⌖" : groupIsSeasonal ? "✦" : "·"}</span><small>{group.district.replace(" · Prygl", "")}{group.routes.length > 1 && <b>{group.routes.length}</b>}</small></button>;
-        })}
+        <BrnoIllustratedMap
+          routes={districtGroups}
+          selectedDistrict={selectedMapDistrict}
+          onSelectDistrict={(district) => {
+            const firstRoute = districtGroups.find((group) => group.district === district)?.routes[0];
+            if (firstRoute) setSelectedId(firstRoute.id);
+          }}
+        />
       </div>
       <aside className="map-route-detail">
         <span className="section-label">BRNO · {selected.district}</span>
@@ -315,8 +355,8 @@ export function CityRouteMap({ routes, onBuy }: { routes: RouteSummary[]; onBuy:
         {selectedDistrictRoutes.length > 1 && <div className="map-route-variants" aria-label={`Trasy v lokalitě ${selected.district}`}>{selectedDistrictRoutes.map((route) => <button key={route.id} className={route.id === selected.id ? "active" : ""} onClick={() => setSelectedId(route.id)} aria-pressed={route.id === selected.id}>{route.title}</button>)}</div>}
         <RouteSuitabilityBadges strollerStatus={selected.strollerStatus} preschoolStatus={selected.preschoolStatus} durationMaxMinutes={selected.durationMaxMinutes} compact />
         <div className="map-route-stats"><span><small>Délka</small><b>{selected.distance} km</b></span><span><small>Čas</small><b>{selected.duration}</b></span><span><small>Licence</small><b>Tým 1–5</b></span></div>
-        <div className="map-price"><div><small>Za celý tým</small><strong>{selected.price} Kč</strong></div><button className="button primary" onClick={() => onBuy(selected)} disabled={selected.status !== "active"}>{selected.status === "active" ? "Koupit pro tým →" : "Připravujeme"}</button></div>
-        <p className="map-availability">{selected.status === "active" ? "Připraveno ke hraní" : `Dostupné po terénním ověření · ${selected.available ?? "připravujeme"}`}</p>
+        <div className="map-price"><div><small>{purchasable ? "Za celý tým" : "Plánovaná cena"}</small><strong>{selected.price} Kč</strong></div><div className="map-price-actions"><button className="button secondary" onClick={() => onDetail(selected)}>Detail trasy</button><button className="button primary" onClick={() => onBuy(selected)} disabled={!purchasable}>{purchasable ? "Koupit →" : "Připravujeme"}</button></div></div>
+        <p className="map-availability">{purchasable ? "Připraveno ke hraní" : `Dostupné po terénním ověření · ${selected.available ?? "připravujeme"}`}</p>
       </aside>
     </section>
   );
@@ -365,84 +405,6 @@ export function ProfileExperience({ auth, completed, activities, badges, onLogin
       </div>
     </section>
   );
-}
-
-type OrderRow = { id: string; user_id: string; package_type: string; route_ids: string[]; amount_czk: number; discount_amount_czk?: number; variable_symbol: string; status: string; created_at: string };
-type EmailTemplate = { id: string; name: string; subject: string; body_html: string; variables: string[] };
-
-export function AdminCenter({ auth }: { auth: AuthController }) {
-  const [section, setSection] = useState<"routes" | "orders" | "discounts" | "emails">("routes");
-  const [orders, setOrders] = useState<OrderRow[]>([]);
-  const [templates, setTemplates] = useState<EmailTemplate[]>([]);
-  const [selectedTemplate, setSelectedTemplate] = useState<EmailTemplate | null>(null);
-  const [message, setMessage] = useState("");
-  const supabase = useMemo(() => getSupabaseBrowserClient(), []);
-
-  const load = useCallback(async () => {
-    if (!supabase || auth.profile?.role !== "superadmin") return;
-    const [{ data: orderData }, { data: templateData }] = await Promise.all([
-      supabase.from("orders").select("*").order("created_at", { ascending: false }),
-      supabase.from("email_templates").select("*").order("name"),
-    ]);
-    setOrders((orderData as OrderRow[]) ?? []);
-    setTemplates((templateData as EmailTemplate[]) ?? []);
-    setSelectedTemplate((current) => current ?? ((templateData?.[0] as EmailTemplate | undefined) ?? null));
-  }, [auth.profile?.role, supabase]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => void load(), 0);
-    return () => window.clearTimeout(timer);
-  }, [load]);
-
-  async function approve(order: OrderRow) {
-    if (!supabase || !auth.user) return;
-    setMessage("");
-    const { data, error } = await supabase.rpc("finalize_order_paid", { p_order_id: order.id });
-    if (error) return setMessage(error.message);
-    const result = data as { paid?: boolean; expired?: boolean } | null;
-    if (!result?.paid) {
-      setMessage(result?.expired ? `Objednávka ${order.variable_symbol} vypršela a byla zrušena.` : "Platbu se nepodařilo potvrdit.");
-      await load();
-      return;
-    }
-    setMessage(`Platba ${order.variable_symbol} je schválená a trasy jsou odemčené.`);
-    await load();
-  }
-
-  async function cancel(order: OrderRow) {
-    if (!supabase || !auth.user) return;
-    setMessage("");
-    const { error } = await supabase.rpc("cancel_checkout_order", { p_order_id: order.id });
-    if (error) return setMessage(error.message);
-    setMessage(`Objednávka ${order.variable_symbol} je zrušená; případná rezervace kupónu se uvolnila.`);
-    await load();
-  }
-
-  async function saveTemplate() {
-    if (!supabase || !selectedTemplate || !auth.user) return;
-    const { error } = await supabase.from("email_templates").update({ subject: selectedTemplate.subject, body_html: selectedTemplate.body_html, updated_by: auth.user.id, updated_at: new Date().toISOString() }).eq("id", selectedTemplate.id);
-    setMessage(error ? error.message : "E-mailová šablona byla uložena.");
-    if (!error) await load();
-  }
-
-  if (!auth.user) return <section className="page section-wrap"><h1>Správa aplikace</h1><p>Pro vstup se přihlas.</p></section>;
-  if (auth.profile?.role !== "route_manager" && auth.profile?.role !== "superadmin") return <section className="page section-wrap"><h1>Přístup jen pro správce</h1><p>Tvůj účet má roli uživatele.</p></section>;
-
-  const isSuperadmin = auth.profile.role === "superadmin";
-  return <section className="page admin-page">
-    <div className="section-wrap page-heading"><span className="section-label">{isSuperadmin ? "Superadmin" : "Správce trasy"}</span><h1>Řídicí centrum</h1><p>Obsah tras, terénní kontrola{isSuperadmin ? ", platby a komunikace" : " a předání k publikaci"} na jednom místě.</p></div>
-    <nav className="section-wrap admin-primary-nav" aria-label="Sekce administrace">
-      <button className={section === "routes" ? "active" : ""} onClick={() => setSection("routes")}>Obsah tras</button>
-      {isSuperadmin && <button className={section === "orders" ? "active" : ""} onClick={() => setSection("orders")}>Objednávky <span>{orders.filter((order) => order.status === "pending").length}</span></button>}
-      {isSuperadmin && <button className={section === "discounts" ? "active" : ""} onClick={() => setSection("discounts")}>Slevové kupóny</button>}
-      {isSuperadmin && <button className={section === "emails" ? "active" : ""} onClick={() => setSection("emails")}>E-maily</button>}
-    </nav>
-    {message && <p className="admin-message section-wrap" role="status">{message}</p>}
-    {section === "routes" && <RouteCms auth={auth} onMessage={setMessage} />}
-    {isSuperadmin && section === "orders" && <div className="section-wrap"><section className="panel admin-orders"><div className="panel-heading"><div><span className="section-label">Čeká na kontrolu</span><h2>QR platby</h2></div><span>{orders.filter((order) => order.status === "pending").length}</span></div>{orders.length === 0 ? <p>Zatím žádné objednávky.</p> : orders.map((order) => <article key={order.id}><div><b>{order.amount_czk} Kč · VS {order.variable_symbol}</b><small>{order.package_type} · {order.route_ids.length} tras · {new Date(order.created_at).toLocaleDateString("cs-CZ")}{order.discount_amount_czk ? ` · sleva ${order.discount_amount_czk} Kč` : ""}</small></div><span className={`order-status ${order.status}`}>{order.status}</span>{order.status === "pending" && <div className="admin-order-actions"><button onClick={() => approve(order)}>Označit zaplaceno</button><button className="secondary" onClick={() => cancel(order)}>Zrušit</button></div>}</article>)}</section></div>}
-    {isSuperadmin && section === "discounts" && <DiscountAdmin onMessage={setMessage} />}
-    {isSuperadmin && section === "emails" && <div className="section-wrap"><section className="panel email-editor"><div className="panel-heading"><div><span className="section-label">Komunikace</span><h2>E-mailové šablony</h2></div></div><div className="template-tabs">{templates.map((template) => <button key={template.id} className={selectedTemplate?.id === template.id ? "active" : ""} onClick={() => setSelectedTemplate(template)}>{template.name}</button>)}</div>{selectedTemplate && <><label>Předmět<input value={selectedTemplate.subject} onChange={(event) => setSelectedTemplate({ ...selectedTemplate, subject: event.target.value })} /></label><label>HTML tělo<textarea rows={10} value={selectedTemplate.body_html} onChange={(event) => setSelectedTemplate({ ...selectedTemplate, body_html: event.target.value })} /></label><small>Proměnné: {selectedTemplate.variables.map((item) => `{{${item}}}`).join(", ")}</small><button className="button primary" onClick={saveTemplate}>Uložit šablonu</button></>}</section></div>}
-  </section>;
 }
 
 export function PartnerSection() {

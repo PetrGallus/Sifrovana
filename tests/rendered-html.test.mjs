@@ -23,7 +23,10 @@ test("server-renders the branded Šifrovaná pilot", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>Šifrovaná — Město je šifra<\/title>/i);
-  assert.match(html, /Rozkládáme mapu/);
+  assert.match(html, /Město není kulisa/);
+  assert.match(html, /Vyber si svou výpravu/);
+  assert.match(html, /Mapa městských částí Brna/);
+  assert.doesNotMatch(html, /Rozkládáme mapu/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
 
@@ -53,7 +56,7 @@ test("contains the versioned local-first route model", async () => {
   assert.match(routeContent, /sourceRefs: SourceRef\[\]/);
   assert.doesNotMatch(routeContent, /accepted_answers|fallback_answers|answers:\s*\[/);
   assert.doesNotMatch(page, /getRouteCheckpoints|puzzle\.answers|fallback\.answers/);
-  assert.match(page, /usePublishedGame\(\)/);
+  assert.match(page, /usePublishedGame\(auth\.user\?\.id \?\? null\)/);
   assert.match(page, /submitAnswer\(/);
   assert.match(routeContent, /price: 449/);
   assert.match(routeContent, /price: 999/);
