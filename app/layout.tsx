@@ -1,27 +1,10 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { resolveSiteUrl } from "../lib/site-url.js";
 
 const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
-
-const fallbackSiteUrl = "https://sifrovana-mestska-hra.galluspeginpetr.chatgpt.site";
-
-function resolveSiteUrl() {
-  const configuredUrl = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-  if (!configuredUrl) return new URL(fallbackSiteUrl);
-
-  try {
-    const siteUrl = new URL(configuredUrl);
-    if (siteUrl.protocol === "https:" || siteUrl.hostname === "localhost" || siteUrl.hostname === "127.0.0.1") {
-      return siteUrl;
-    }
-  } catch {
-    // A malformed build-time value must not make metadata generation fail.
-  }
-
-  return new URL(fallbackSiteUrl);
-}
 
 export const viewport: Viewport = {
   width: "device-width",
