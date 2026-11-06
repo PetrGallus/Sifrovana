@@ -80,6 +80,8 @@ NEXT_PUBLIC_GOOGLE_MAPS_EMBED_KEY=
 
 `NEXT_PUBLIC_GOOGLE_MAPS_EMBED_KEY` je volitelný veřejný klíč omezený na Maps Embed API a domény Šifrované. Bez něj herní mapa automaticky použije bezklíčový náhled OpenStreetMap; externí navigace v Mapy.com a Google Maps funguje bez klíče vždy.
 
+Proměnné s prefixem `NEXT_PUBLIC_` musí být přítomné už při `vinext build`; samotné nastavení runtime proměnných v Sites nepřepíše hotové klientské chunky. Produkční release proto balí lokální build vytvořený se stejnou revizí veřejných Sites proměnných. Po nasazení se vždy ověřuje živé načtení katalogu ze Supabase, ne pouze HTTP dostupnost stránky.
+
 ## Struktura
 
 - `app/` – uživatelské rozhraní a společný herní engine;
