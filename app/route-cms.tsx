@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element -- CMS previews user-managed Supabase images. */
 
-import { ChangeEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabaseBrowserClient } from "../lib/supabase/client";
 import { googlePointUrl, mapyPointUrl } from "../lib/map-links";
 import type { RoutePreschoolStatus, RouteStrollerStatus } from "../lib/route-suitability";
@@ -11,6 +11,7 @@ import { RouteSuitabilityBadges } from "./route-suitability-badges";
 
 type RouteLifecycle = "draft" | "review" | "testing" | "active" | "maintenance" | "retired";
 type RouteAvailability = "active" | "coming" | "seasonal";
+type CommercialReadiness = "blocked" | "ready";
 type CheckpointType = "online" | "physical" | "hybrid";
 type MediaRole = "cover" | "public" | "field";
 
@@ -30,6 +31,7 @@ type CmsRoute = {
   preschool_status: RoutePreschoolStatus;
   difficulty: string;
   availability: RouteAvailability;
+  commercial_readiness: CommercialReadiness;
   lifecycle: RouteLifecycle;
   version: string;
   team_min: number;
@@ -62,7 +64,7 @@ type CmsCheckpoint = {
   latitude: number;
   longitude: number;
   checkpoint_type: CheckpointType;
-  distance_from_previous_km: number;
+  distance_from_previous_km: number | null;
   story: string;
   puzzle_prompt: string;
   accepted_answers: string[];
@@ -72,9 +74,11 @@ type CmsCheckpoint = {
   fallback_answers: string[];
   fact: string;
   next_clue: string;
+  meta_token: string | null;
   map_x: number;
   map_y: number;
   internal_notes: string;
+  is_active: boolean;
   updated_at: string;
 };
 
@@ -126,6 +130,7 @@ const emptyRoute: CmsRoute = {
   preschool_status: "unknown",
   difficulty: "Střední",
   availability: "coming",
+  commercial_readiness: "blocked",
   lifecycle: "draft",
   version: "0.1.0",
   team_min: 1,
@@ -185,8 +190,30 @@ function csv(value: string) {
   return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
-function routeValidation(route: CmsRoute, checkpoints: CmsCheckpoint[], sources: CmsSource[], media: CmsMedia[]) {
+function isHttpsUrl(value: string) {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function routeValidation(route: CmsRoute, checkpoints: CmsCheckpoint[], sources: CmsSource[], media: CmsMedia[], dirtySourceIds: string[], requireCommercialReadiness: boolean) {
   const issues: string[] = [];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const isFutureDate = (value: string | null) => Boolean(value && new Date(`${value.slice(0, 10)}T00:00:00`) > today);
+  const seasonalVerificationStart = route.availability === "seasonal" && route.available_from
+    ? new Date(`${route.available_from.slice(0, 10)}T00:00:00`)
+    : null;
+  seasonalVerificationStart?.setDate(seasonalVerificationStart.getDate() - 14);
+  const isValidSource = (source: CmsSource) => Boolean(source.title.trim() && isHttpsUrl(source.url));
+  const isCurrentlyVerified = (source: CmsSource) => Boolean(
+    isValidSource(source)
+    && source.verified_at
+    && !isFutureDate(source.verified_at)
+    && (!requireCommercialReadiness || !seasonalVerificationStart || new Date(`${source.verified_at.slice(0, 10)}T00:00:00`) >= seasonalVerificationStart),
+  );
   if (!route.id || !route.city_id || !route.district || !route.title || !route.tagline) issues.push("Doplň základní údaje a slug trasy.");
   if (!route.description) issues.push("Doplň prodejní a příběhový popis.");
   if (route.distance_km <= 0 || route.duration_min <= 0 || route.duration_max < route.duration_min) issues.push("Zkontroluj délku a časovou dotaci.");
@@ -194,19 +221,44 @@ function routeValidation(route: CmsRoute, checkpoints: CmsCheckpoint[], sources:
   if (route.preschool_status === "unknown") issues.push("Rozhodni, zda je trasa vhodná pro předškolní děti.");
   if (route.team_min < 1 || route.team_max < route.team_min) issues.push("Zkontroluj velikost týmu.");
   if (!route.accessibility_note || !route.safety_note) issues.push("Doplň přístupnost a bezpečnost.");
-  if (sources.filter((source) => source.checkpoint_id === null).length === 0) issues.push("Přidej alespoň jeden zdroj celé trasy.");
-  if (checkpoints.length === 0) issues.push("Trasa zatím nemá žádný checkpoint.");
-  checkpoints.forEach((checkpoint, index) => {
-    const label = `Stopa ${index + 1}`;
+  if (!route.last_field_check) issues.push("Zapiš datum posledního kompletního terénního průchodu.");
+  else if (isFutureDate(route.last_field_check)) issues.push("Datum terénního průchodu nesmí být v budoucnosti.");
+  if (route.availability === "seasonal") {
+    if (!route.available_from || !route.available_to) issues.push("Sezónní trasa potřebuje začátek i konec dostupnosti.");
+    else if (route.available_from > route.available_to) issues.push("Začátek sezónní dostupnosti musí být před jejím koncem.");
+    else if (requireCommercialReadiness && seasonalVerificationStart) {
+      const availabilityEnd = new Date(`${route.available_to.slice(0, 10)}T23:59:59`);
+      if (today < seasonalVerificationStart || today > availabilityEnd) issues.push("Sezónní trasu lze publikovat nejdříve 14 dní před začátkem a nejpozději v poslední den dostupnosti.");
+      if (route.last_field_check && new Date(`${route.last_field_check.slice(0, 10)}T00:00:00`) < seasonalVerificationStart) issues.push("Sezónní trasa potřebuje nový terénní průchod nejdříve 14 dní před začátkem dostupnosti.");
+    }
+  }
+  if (requireCommercialReadiness && route.commercial_readiness !== "ready") issues.push("Trasa je obchodně blokovaná. Superadmin ji musí po obsahové a terénní kontrole schválit k prodeji.");
+  if (dirtySourceIds.length > 0) issues.push("Ulož rozpracované změny zdrojů.");
+  const routeSources = sources.filter((source) => source.checkpoint_id === null);
+  if (routeSources.length === 0) issues.push("Přidej alespoň jeden zdroj celé trasy.");
+  else if (routeSources.some((source) => !isValidSource(source))) issues.push("Zdroj celé trasy potřebuje název a platnou HTTPS adresu.");
+  else if (!routeSources.some(isCurrentlyVerified)) issues.push("Ověř alespoň jeden zdroj celé trasy a zapiš platné datum kontroly.");
+  if (sources.some((source) => (source.checkpoint_id === null || checkpoints.some((checkpoint) => checkpoint.id === source.checkpoint_id && checkpoint.is_active)) && isFutureDate(source.verified_at))) issues.push("Datum ověření zdroje nesmí být v budoucnosti.");
+  const activeCheckpoints = checkpoints.filter((checkpoint) => checkpoint.is_active).sort((left, right) => left.position - right.position);
+  if (activeCheckpoints.length === 0) issues.push("Zařaď do příští publikace alespoň jeden checkpoint.");
+  else if (activeCheckpoints.some((checkpoint, index) => checkpoint.position !== index + 1)) issues.push("Checkpointy příští publikace musí mít souvislé pořadí od 1 bez pracovních bodů mezi nimi.");
+  activeCheckpoints.forEach((checkpoint, index) => {
+    const label = `Stopa ${checkpoint.position}`;
     if (!checkpoint.title || !checkpoint.story || !checkpoint.puzzle_prompt) issues.push(`${label}: chybí název, příběh nebo zadání.`);
     if (checkpoint.accepted_answers.length === 0) issues.push(`${label}: chybí přijímaná odpověď.`);
     if (!checkpoint.hint_1 || !checkpoint.hint_2) issues.push(`${label}: musí mít dvě nápovědy.`);
     if (!checkpoint.fallback_prompt || checkpoint.fallback_answers.length === 0) issues.push(`${label}: chybí záložní zadání nebo odpověď.`);
-    if (!checkpoint.fact || (index < checkpoints.length - 1 && !checkpoint.next_clue)) issues.push(`${label}: doplň odhalený fakt a další indicii.`);
+    if (!checkpoint.fact || (index < activeCheckpoints.length - 1 && !checkpoint.next_clue)) issues.push(`${label}: doplň odhalený fakt a další indicii.`);
     if (checkpoint.latitude < -90 || checkpoint.latitude > 90 || checkpoint.longitude < -180 || checkpoint.longitude > 180) issues.push(`${label}: souřadnice nejsou platné.`);
-    if (!sources.some((source) => source.checkpoint_id === checkpoint.id)) issues.push(`${label}: historické tvrzení nemá přiřazený zdroj.`);
+    const checkpointSources = sources.filter((source) => source.checkpoint_id === checkpoint.id);
+    if (checkpointSources.length === 0) issues.push(`${label}: historické tvrzení nemá přiřazený zdroj.`);
+    else if (checkpointSources.some((source) => !isValidSource(source))) issues.push(`${label}: zdroj potřebuje název a platnou HTTPS adresu.`);
+    else if (!checkpointSources.some(isCurrentlyVerified)) issues.push(`${label}: zdroj nemá zapsané platné datum redakčního ověření.`);
+    if (checkpoint.position === 1 && checkpoint.distance_from_previous_km !== 0) issues.push(`${label}: první checkpoint musí mít vzdálenost 0 km.`);
+    if (checkpoint.position > 1 && (!checkpoint.distance_from_previous_km || checkpoint.distance_from_previous_km <= 0)) issues.push(`${label}: doplň kladnou vzdálenost od předchozího bodu.`);
   });
-  media.filter((item) => !item.archived_at && item.media_role !== "field").forEach((item) => {
+  const activeCheckpointIds = new Set(activeCheckpoints.map((item) => item.id));
+  media.filter((item) => !item.archived_at && item.media_role !== "field" && (item.checkpoint_id === null || activeCheckpointIds.has(item.checkpoint_id))).forEach((item) => {
     if (!item.alt_text.trim()) issues.push("Veřejná fotografie nemá alternativní text.");
   });
   return issues;
@@ -220,9 +272,12 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
   const supabase = useMemo(() => getSupabaseBrowserClient(), []);
   const [routes, setRoutes] = useState<CmsRoute[]>([]);
   const [route, setRoute] = useState<CmsRoute | null>(null);
+  const [savedRouteState, setSavedRouteState] = useState("");
   const [checkpoints, setCheckpoints] = useState<CmsCheckpoint[]>([]);
   const [checkpoint, setCheckpoint] = useState<CmsCheckpoint | null>(null);
+  const [savedCheckpointState, setSavedCheckpointState] = useState("");
   const [sources, setSources] = useState<CmsSource[]>([]);
+  const [dirtySourceIds, setDirtySourceIds] = useState<string[]>([]);
   const [media, setMedia] = useState<CmsMedia[]>([]);
   const [screen, setScreen] = useState<"list" | "route" | "checkpoint">("list");
   const [search, setSearch] = useState("");
@@ -232,8 +287,22 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
   const [message, setMessage] = useState("");
   const [answerTest, setAnswerTest] = useState("");
   const [mediaForm, setMediaForm] = useState<MediaForm>({ role: "public", alt: "", author: "", license: "" });
+  const routeLoadSequence = useRef(0);
 
   const isSuperadmin = auth.profile?.role === "superadmin";
+  const routeHasUnsavedChanges = Boolean(route && JSON.stringify(route) !== savedRouteState);
+  const checkpointHasUnsavedChanges = Boolean(checkpoint && JSON.stringify(checkpoint) !== savedCheckpointState);
+  const hasUnsavedChanges = dirtySourceIds.length > 0 || routeHasUnsavedChanges || checkpointHasUnsavedChanges;
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [hasUnsavedChanges]);
 
   const notify = useCallback((next: string) => {
     setMessage(next);
@@ -259,39 +328,71 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
 
   async function loadRouteContent(routeId: string) {
     if (!supabase) return;
+    const loadSequence = ++routeLoadSequence.current;
     const [{ data: checkpointData, error: checkpointError }, { data: sourceData, error: sourceError }, { data: mediaData, error: mediaError }] = await Promise.all([
       supabase.from("cms_checkpoints").select("*").eq("route_id", routeId).order("position"),
       supabase.from("cms_sources").select("*").eq("route_id", routeId).order("sort_order"),
       supabase.from("cms_media").select("*").eq("route_id", routeId).order("sort_order"),
     ]);
+    if (loadSequence !== routeLoadSequence.current) return;
     const error = checkpointError ?? sourceError ?? mediaError;
     if (error) notify(`Obsah trasy se nepodařilo načíst: ${error.message}`);
     setCheckpoints((checkpointData as CmsCheckpoint[] | null) ?? []);
     setSources((sourceData as CmsSource[] | null) ?? []);
+    setDirtySourceIds([]);
     const storedMedia = (mediaData as CmsMedia[] | null) ?? [];
     const signedMedia = await Promise.all(storedMedia.map(async (item) => {
       const { data: signed } = await supabase.storage.from("route-media").createSignedUrl(item.storage_path, 3600);
       return { ...item, public_url: signed?.signedUrl ?? "" };
     }));
+    if (loadSequence !== routeLoadSequence.current) return;
     setMedia(signedMedia);
   }
 
   async function openRoute(item: CmsRoute) {
+    if (hasUnsavedChanges && !window.confirm("Máš neuložené změny. Opravdu je zahodit a otevřít jinou trasu?")) return;
+    routeLoadSequence.current += 1;
     setRoute({ ...item });
+    setSavedRouteState(JSON.stringify(item));
+    setCheckpoints([]);
+    setSources([]);
+    setDirtySourceIds([]);
+    setMedia([]);
     setCheckpoint(null);
+    setSavedCheckpointState("");
     setScreen("route");
     setMessage("");
     await loadRouteContent(item.id);
   }
 
   function beginNewRoute() {
+    if (hasUnsavedChanges && !window.confirm("Máš neuložené změny. Opravdu je zahodit a založit novou trasu?")) return;
+    routeLoadSequence.current += 1;
     const draft = { ...emptyRoute, assigned_to: auth.user?.id ?? null };
     setRoute(draft);
+    setSavedRouteState(JSON.stringify(draft));
     setCheckpoints([]);
     setSources([]);
+    setDirtySourceIds([]);
     setMedia([]);
     setCheckpoint(null);
+    setSavedCheckpointState("");
     setScreen("route");
+  }
+
+  function leaveRouteEditor() {
+    if (hasUnsavedChanges && !window.confirm("Máš neuložené změny. Opravdu je zahodit a vrátit se na seznam tras?")) return;
+    routeLoadSequence.current += 1;
+    setRoute(null);
+    setSavedRouteState("");
+    setCheckpoint(null);
+    setSavedCheckpointState("");
+    setCheckpoints([]);
+    setSources([]);
+    setDirtySourceIds([]);
+    setMedia([]);
+    setScreen("list");
+    void loadRoutes();
   }
 
   async function saveRoute(nextLifecycle?: RouteLifecycle) {
@@ -302,7 +403,13 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
       return false;
     }
     setBusy(true);
-    const payload = { ...route, id, lifecycle: nextLifecycle ?? route.lifecycle, updated_at: new Date().toISOString() };
+    const payload = {
+      ...route,
+      id,
+      lifecycle: nextLifecycle ?? route.lifecycle,
+      seasonality: route.availability === "seasonal" ? "seasonal" : "year-round",
+      updated_at: new Date().toISOString(),
+    };
     const existing = routes.some((item) => item.id === id);
     const query = existing
       ? supabase.from("cms_routes").update(payload).eq("id", id)
@@ -314,6 +421,7 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
       return false;
     }
     setRoute(data as CmsRoute);
+    setSavedRouteState(JSON.stringify(data));
     notify(nextLifecycle === "active" ? "Trasa byla publikována." : nextLifecycle === "review" ? "Trasa byla předána ke kontrole." : "Koncept trasy je uložený.");
     await loadRoutes();
     return true;
@@ -329,14 +437,17 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
     notify("Trasa byla publikována jako neměnná verze a katalog je aktualizovaný.");
     await loadRoutes();
     const { data } = await supabase.from("cms_routes").select("*").eq("id", route.id).single();
-    if (data) setRoute(data as CmsRoute);
+    if (data) {
+      setRoute(data as CmsRoute);
+      setSavedRouteState(JSON.stringify(data));
+    }
   }
 
   function beginCheckpoint() {
     if (!route) return;
-    const position = checkpoints.length + 1;
-    setCheckpoint({
-      id: `${route.id || "nova-trasa"}-stopa-${position}`,
+    const position = Math.max(0, ...checkpoints.map((item) => item.position)) + 1;
+    const draft: CmsCheckpoint = {
+      id: `${route.id || "nova-trasa"}-stopa-${position}-${crypto.randomUUID()}`,
       route_id: route.id,
       position,
       title: "",
@@ -344,7 +455,7 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
       latitude: 49.2,
       longitude: 16.6,
       checkpoint_type: "hybrid",
-      distance_from_previous_km: position === 1 ? 0 : 0.5,
+      distance_from_previous_km: position === 1 ? 0 : null,
       story: "",
       puzzle_prompt: "",
       accepted_answers: [],
@@ -354,36 +465,63 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
       fallback_answers: [],
       fact: "",
       next_clue: "",
+      meta_token: null,
       map_x: 50,
       map_y: 50,
       internal_notes: "",
+      is_active: false,
       updated_at: "",
-    });
+    };
+    setCheckpoint(draft);
+    setSavedCheckpointState(JSON.stringify(draft));
     setAnswerTest("");
     setScreen("checkpoint");
   }
 
   function openCheckpoint(item: CmsCheckpoint) {
     setCheckpoint({ ...item });
+    setSavedCheckpointState(JSON.stringify(item));
     setAnswerTest("");
     setScreen("checkpoint");
+  }
+
+  function leaveCheckpointEditor() {
+    if (checkpointHasUnsavedChanges && !window.confirm("Checkpoint má neuložené změny. Opravdu je zahodit?")) return;
+    setCheckpoint(null);
+    setSavedCheckpointState("");
+    setScreen("route");
   }
 
   async function saveCheckpoint() {
     if (!supabase || !checkpoint || !route) return;
     if (!checkpoint.id.trim() || !checkpoint.title.trim()) return notify("Checkpoint potřebuje ID a název.");
+    const existingCheckpoint = checkpoints.find((item) => item.id === checkpoint.id);
+    if (existingCheckpoint && existingCheckpoint.route_id !== route.id) return notify("Checkpoint patří k jiné trase a nelze ho přesunout uložením.");
+    if (checkpoint.route_id !== route.id) return notify("Obsah checkpointu nepatří k otevřené trase. Načti trasu znovu.");
     setBusy(true);
     const payload = { ...checkpoint, route_id: route.id, updated_at: new Date().toISOString() };
-    const { data, error } = await supabase.from("cms_checkpoints").upsert(payload).select().single();
+    const query = existingCheckpoint
+      ? supabase.from("cms_checkpoints").update(payload).eq("id", checkpoint.id).eq("route_id", route.id)
+      : supabase.from("cms_checkpoints").insert(payload);
+    const { data, error } = await query.select().single();
     setBusy(false);
     if (error) return notify(`Checkpoint se nepodařilo uložit: ${error.message}`);
-    setCheckpoint(data as CmsCheckpoint);
+    const savedCheckpoint = data as CmsCheckpoint;
+    setCheckpoint(savedCheckpoint);
+    setSavedCheckpointState(JSON.stringify(savedCheckpoint));
+    setCheckpoints((current) => {
+      const exists = current.some((item) => item.id === savedCheckpoint.id);
+      const next = exists
+        ? current.map((item) => item.id === savedCheckpoint.id ? savedCheckpoint : item)
+        : [...current, savedCheckpoint];
+      return next.sort((left, right) => left.position - right.position);
+    });
     notify("Checkpoint je uložený.");
-    await loadRouteContent(route.id);
   }
 
   async function moveCheckpoint(item: CmsCheckpoint, direction: -1 | 1) {
     if (!supabase || !route) return;
+    if (dirtySourceIds.length > 0) return notify("Nejdřív ulož rozpracované změny zdrojů.");
     const ordered = [...checkpoints].sort((a, b) => a.position - b.position);
     const currentIndex = ordered.findIndex((candidate) => candidate.id === item.id);
     const other = ordered[currentIndex + direction];
@@ -401,6 +539,7 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
 
   async function removeCheckpoint(item: CmsCheckpoint) {
     if (!supabase || !route || route.lifecycle !== "draft") return;
+    if (dirtySourceIds.length > 0) return notify("Nejdřív ulož rozpracované změny zdrojů.");
     if (!window.confirm(`Opravdu odstranit checkpoint „${item.title}“ z konceptu?`)) return;
     const { error } = await supabase.from("cms_checkpoints").delete().eq("id", item.id).eq("route_id", route.id);
     if (error) return notify(`Checkpoint se nepodařilo odstranit: ${error.message}`);
@@ -408,34 +547,63 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
     await loadRouteContent(route.id);
   }
 
-  async function addSource(checkpointId: string | null) {
-    if (!supabase || !route) return;
-    const draft: Omit<CmsSource, "id"> = {
+  function addSource(checkpointId: string | null) {
+    if (!route) return;
+    const draft: CmsSource = {
+      id: `draft-${crypto.randomUUID()}`,
       route_id: route.id,
       checkpoint_id: checkpointId,
-      title: "Nový zdroj",
+      title: "",
       url: "https://",
       verified_at: null,
       internal_note: "",
       sort_order: sources.filter((item) => item.checkpoint_id === checkpointId).length,
     };
-    const { data, error } = await supabase.from("cms_sources").insert(draft).select().single();
-    if (error) return notify(`Zdroj se nepodařilo přidat: ${error.message}`);
-    setSources((current) => [...current, data as CmsSource]);
+    setSources((current) => [...current, draft]);
+    setDirtySourceIds((current) => [...current, draft.id]);
   }
 
   async function saveSource(item: CmsSource) {
     if (!supabase) return;
-    const { error } = await supabase.from("cms_sources").update({ title: item.title, url: item.url, verified_at: item.verified_at || null, internal_note: item.internal_note, sort_order: item.sort_order }).eq("id", item.id);
+    if (!item.title.trim() || !isHttpsUrl(item.url)) return notify("Zdroj potřebuje název a platnou HTTPS adresu.");
+    const sourcePayload = {
+      route_id: item.route_id,
+      checkpoint_id: item.checkpoint_id,
+      title: item.title,
+      url: item.url,
+      verified_at: item.verified_at || null,
+      internal_note: item.internal_note,
+      sort_order: item.sort_order,
+    };
+    const result = item.id.startsWith("draft-")
+      ? await supabase.from("cms_sources").insert(sourcePayload).select().single()
+      : await supabase.from("cms_sources").update(sourcePayload).eq("id", item.id).select().single();
+    const { data, error } = result;
+    if (!error && data) {
+      setSources((current) => current.map((source) => source.id === item.id ? data as CmsSource : source));
+      setDirtySourceIds((current) => current.filter((id) => id !== item.id));
+    }
     notify(error ? `Zdroj se nepodařilo uložit: ${error.message}` : "Zdroj je uložený.");
   }
 
+  function changeSource(item: CmsSource) {
+    setSources((current) => current.map((source) => source.id === item.id ? item : source));
+    setDirtySourceIds((current) => current.includes(item.id) ? current : [...current, item.id]);
+  }
+
   async function removeSource(item: CmsSource) {
-    if (!supabase || !route || route.lifecycle !== "draft") return;
+    if (!route) return;
     if (!window.confirm(`Odstranit zdroj „${item.title}“?`)) return;
+    if (item.id.startsWith("draft-")) {
+      setSources((current) => current.filter((source) => source.id !== item.id));
+      setDirtySourceIds((current) => current.filter((id) => id !== item.id));
+      return;
+    }
+    if (!supabase) return;
     const { error } = await supabase.from("cms_sources").delete().eq("id", item.id);
     if (error) return notify(`Zdroj se nepodařilo odstranit: ${error.message}`);
     setSources((current) => current.filter((source) => source.id !== item.id));
+    setDirtySourceIds((current) => current.filter((id) => id !== item.id));
   }
 
   async function uploadMedia(event: ChangeEvent<HTMLInputElement>, checkpointId: string | null) {
@@ -512,24 +680,39 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
   }
 
   if (!route) return null;
-  const validation = routeValidation(route, checkpoints, sources, media);
+  const validation = routeValidation(route, checkpoints, sources, media, dirtySourceIds, isSuperadmin);
+  const routeIsSaved = routes.some((item) => item.id === route.id);
 
   if (screen === "checkpoint" && checkpoint) {
     const checkpointSources = sources.filter((source) => source.checkpoint_id === checkpoint.id);
     const checkpointMedia = media.filter((item) => item.checkpoint_id === checkpoint.id && !item.archived_at);
+    const checkpointIsSaved = checkpoints.some((item) => item.id === checkpoint.id);
     const answerMatches = answerTest.trim().length > 0 && checkpoint.accepted_answers.some((accepted) => normalizeAnswer(accepted) === normalizeAnswer(answerTest));
     return (
       <section className="cms-workspace cms-editor">
-        <header className="cms-editor-heading"><button className="cms-back" onClick={() => setScreen("route")}>← {route.title || "Trasa"}</button><div><span className="section-label">Checkpoint {checkpoint.position} z {Math.max(checkpoints.length, checkpoint.position)}</span><h2>{checkpoint.title || "Nový checkpoint"}</h2></div><button className="button primary" onClick={() => void saveCheckpoint()} disabled={busy}>{busy ? "Ukládám…" : "Uložit checkpoint"}</button></header>
+        <header className="cms-editor-heading"><button className="cms-back" onClick={leaveCheckpointEditor}>← {route.title || "Trasa"}</button><div><span className="section-label">Checkpoint {checkpoint.position} z {Math.max(checkpoints.length, checkpoint.position)}</span><h2>{checkpoint.title || "Nový checkpoint"}</h2></div><button className="button primary" onClick={() => void saveCheckpoint()} disabled={busy}>{busy ? "Ukládám…" : "Uložit checkpoint"}</button></header>
         {message && <p className="cms-message" role="status">{message}</p>}
         <div className="cms-editor-grid"><div className="cms-form-stack">
-          <details open className="cms-form-section"><summary>Místo a poloha</summary><div className="cms-fields"><label>ID checkpointu<input value={checkpoint.id} onChange={(event) => setCheckpoint({ ...checkpoint, id: slugify(event.target.value) })} disabled={checkpoints.some((item) => item.id === checkpoint.id)} /></label><label>Název<input value={checkpoint.title} onChange={(event) => setCheckpoint({ ...checkpoint, title: event.target.value })} /></label><label>Krátký název místa<input value={checkpoint.short_title} onChange={(event) => setCheckpoint({ ...checkpoint, short_title: event.target.value })} /></label><label>Typ stopy<select value={checkpoint.checkpoint_type} onChange={(event) => setCheckpoint({ ...checkpoint, checkpoint_type: event.target.value as CheckpointType })}><option value="online">Online</option><option value="physical">Fyzická</option><option value="hybrid">Hybridní</option></select></label><label>Zeměpisná šířka<input type="number" step="0.000001" value={checkpoint.latitude} onChange={(event) => setCheckpoint({ ...checkpoint, latitude: Number(event.target.value) })} /></label><label>Zeměpisná délka<input type="number" step="0.000001" value={checkpoint.longitude} onChange={(event) => setCheckpoint({ ...checkpoint, longitude: Number(event.target.value) })} /></label><label>Km od předchozího bodu<input type="number" min="0" step="0.1" value={checkpoint.distance_from_previous_km} onChange={(event) => setCheckpoint({ ...checkpoint, distance_from_previous_km: Number(event.target.value) })} /></label></div><div className="cms-map-links"><a className="cms-map-link" href={mapyPointUrl({ lat: checkpoint.latitude, lng: checkpoint.longitude })} target="_blank" rel="noreferrer">Zkontrolovat v Mapy.com ↗</a><a className="cms-map-link" href={googlePointUrl({ lat: checkpoint.latitude, lng: checkpoint.longitude })} target="_blank" rel="noreferrer">Zkontrolovat v Google Maps ↗</a></div></details>
+          <details open className="cms-form-section">
+            <summary>Místo a poloha</summary>
+            <div className="cms-fields">
+              <label>ID checkpointu<input value={checkpoint.id} onChange={(event) => setCheckpoint({ ...checkpoint, id: slugify(event.target.value) })} disabled={checkpointIsSaved} /></label>
+              <label>Název<input value={checkpoint.title} onChange={(event) => setCheckpoint({ ...checkpoint, title: event.target.value })} /></label>
+              <label>Krátký název místa<input value={checkpoint.short_title} onChange={(event) => setCheckpoint({ ...checkpoint, short_title: event.target.value })} /></label>
+              <label>Typ stopy<select value={checkpoint.checkpoint_type} onChange={(event) => setCheckpoint({ ...checkpoint, checkpoint_type: event.target.value as CheckpointType })}><option value="online">Online</option><option value="physical">Fyzická</option><option value="hybrid">Hybridní</option></select></label>
+              <label>Zeměpisná šířka<input type="number" step="0.000001" value={checkpoint.latitude} onChange={(event) => setCheckpoint({ ...checkpoint, latitude: Number(event.target.value) })} /></label>
+              <label>Zeměpisná délka<input type="number" step="0.000001" value={checkpoint.longitude} onChange={(event) => setCheckpoint({ ...checkpoint, longitude: Number(event.target.value) })} /></label>
+              <label>Km od předchozího bodu<input type="number" min="0" step="0.1" value={checkpoint.distance_from_previous_km ?? ""} placeholder="Změřit v terénu" onChange={(event) => setCheckpoint({ ...checkpoint, distance_from_previous_km: event.target.value === "" ? null : Number(event.target.value) })} /></label>
+              <label className="cms-check-field"><input type="checkbox" checked={checkpoint.is_active} onChange={(event) => setCheckpoint({ ...checkpoint, is_active: event.target.checked })} /><span>Zařadit do příští publikace<small>Zařazení určuje obsah nového snapshotu. Fyzickou kontrolu eviduj samostatně v terénních poznámkách.</small></span></label>
+            </div>
+            <div className="cms-map-links"><a className="cms-map-link" href={mapyPointUrl({ lat: checkpoint.latitude, lng: checkpoint.longitude })} target="_blank" rel="noreferrer">Zkontrolovat v Mapy.com ↗</a><a className="cms-map-link" href={googlePointUrl({ lat: checkpoint.latitude, lng: checkpoint.longitude })} target="_blank" rel="noreferrer">Zkontrolovat v Google Maps ↗</a></div>
+          </details>
           <details open className="cms-form-section"><summary>Příběh a šifra</summary><label>Úvod příběhu<textarea rows={5} value={checkpoint.story} onChange={(event) => setCheckpoint({ ...checkpoint, story: event.target.value })} /></label><label>Zadání šifry<textarea rows={5} value={checkpoint.puzzle_prompt} onChange={(event) => setCheckpoint({ ...checkpoint, puzzle_prompt: event.target.value })} /></label><label>Přijímané odpovědi <small>oddělené čárkou</small><input value={checkpoint.accepted_answers.join(", ")} onChange={(event) => setCheckpoint({ ...checkpoint, accepted_answers: csv(event.target.value) })} /></label><div className="cms-answer-test"><label>Tester odpovědi<input value={answerTest} onChange={(event) => setAnswerTest(event.target.value)} placeholder="Zkus odpověď jako hráč" /></label>{answerTest && <span className={answerMatches ? "valid" : "invalid"}>{answerMatches ? "✓ Odpověď projde" : "× Odpověď neprojde"}</span>}</div><label>Nápověda 1<textarea rows={3} value={checkpoint.hint_1} onChange={(event) => setCheckpoint({ ...checkpoint, hint_1: event.target.value })} /></label><label>Nápověda 2<textarea rows={3} value={checkpoint.hint_2} onChange={(event) => setCheckpoint({ ...checkpoint, hint_2: event.target.value })} /></label></details>
           <details open className="cms-form-section"><summary>Záložní zadání</summary><label>Otázka při nedostupném místě<textarea rows={4} value={checkpoint.fallback_prompt} onChange={(event) => setCheckpoint({ ...checkpoint, fallback_prompt: event.target.value })} /></label><label>Přijímané odpovědi <small>oddělené čárkou</small><input value={checkpoint.fallback_answers.join(", ")} onChange={(event) => setCheckpoint({ ...checkpoint, fallback_answers: csv(event.target.value) })} /></label></details>
-          <details open className="cms-form-section"><summary>Odhalení a další stopa</summary><label>Odhalená zajímavost<textarea rows={5} value={checkpoint.fact} onChange={(event) => setCheckpoint({ ...checkpoint, fact: event.target.value })} /></label><label>Indicie k dalšímu bodu<textarea rows={4} value={checkpoint.next_clue} onChange={(event) => setCheckpoint({ ...checkpoint, next_clue: event.target.value })} /></label><label>Interní terénní poznámky<textarea rows={4} value={checkpoint.internal_notes} onChange={(event) => setCheckpoint({ ...checkpoint, internal_notes: event.target.value })} /></label></details>
-          <SourceEditor sources={checkpointSources} onChange={(next) => setSources((current) => current.map((item) => item.id === next.id ? next : item))} onAdd={() => void addSource(checkpoint.id)} onSave={(item) => void saveSource(item)} onRemove={(item) => void removeSource(item)} canRemove={route.lifecycle === "draft"} />
-          <MediaEditor items={checkpointMedia} form={mediaForm} onForm={setMediaForm} onUpload={(event) => void uploadMedia(event, checkpoint.id)} onArchive={(item) => void archiveMedia(item)} busy={busy} />
-        </div><aside className="cms-side-panel"><span className="section-label">Rychlá kontrola</span><h3>{checkpoint.title || "Nová stopa"}</h3><ul><li className={checkpoint.story ? "done" : ""}>Příběh</li><li className={checkpoint.puzzle_prompt && checkpoint.accepted_answers.length > 0 ? "done" : ""}>Šifra a odpověď</li><li className={checkpoint.hint_1 && checkpoint.hint_2 ? "done" : ""}>Dvě nápovědy</li><li className={checkpoint.fallback_prompt && checkpoint.fallback_answers.length > 0 ? "done" : ""}>Záložní varianta</li><li className={checkpoint.fact ? "done" : ""}>Odhalená zajímavost</li><li className={checkpointSources.length > 0 ? "done" : ""}>Zdroj tvrzení</li></ul></aside></div>
+          <details open className="cms-form-section"><summary>Odhalení a další stopa</summary><label>Odhalená zajímavost<textarea rows={5} value={checkpoint.fact} onChange={(event) => setCheckpoint({ ...checkpoint, fact: event.target.value })} /></label><label>Fragment do metašifry <small>nepovinné; ukáže se hráči až po správném vyřešení</small><input value={checkpoint.meta_token ?? ""} onChange={(event) => setCheckpoint({ ...checkpoint, meta_token: event.target.value || null })} placeholder="Např. V, symbol klíče nebo část hesla" /></label><label>Indicie k dalšímu bodu<textarea rows={4} value={checkpoint.next_clue} onChange={(event) => setCheckpoint({ ...checkpoint, next_clue: event.target.value })} /></label><label>Interní terénní poznámky<textarea rows={4} value={checkpoint.internal_notes} onChange={(event) => setCheckpoint({ ...checkpoint, internal_notes: event.target.value })} /></label></details>
+          <SourceEditor sources={checkpointSources} onChange={changeSource} onAdd={() => void addSource(checkpoint.id)} onSave={(item) => void saveSource(item)} onRemove={(item) => void removeSource(item)} canAdd={checkpointIsSaved} canRemove />
+          <MediaEditor items={checkpointMedia} form={mediaForm} onForm={setMediaForm} onUpload={(event) => void uploadMedia(event, checkpoint.id)} onArchive={(item) => void archiveMedia(item)} busy={busy} canUpload={checkpointIsSaved} />
+        </div><aside className="cms-side-panel"><span className="section-label">Rychlá kontrola</span><h3>{checkpoint.title || "Nová stopa"}</h3><ul><li className={checkpoint.story ? "done" : ""}>Příběh</li><li className={checkpoint.puzzle_prompt && checkpoint.accepted_answers.length > 0 ? "done" : ""}>Šifra a odpověď</li><li className={checkpoint.hint_1 && checkpoint.hint_2 ? "done" : ""}>Dvě nápovědy</li><li className={checkpoint.fallback_prompt && checkpoint.fallback_answers.length > 0 ? "done" : ""}>Záložní varianta</li><li className={checkpoint.fact ? "done" : ""}>Odhalená zajímavost</li><li className={checkpointSources.length > 0 ? "done" : ""}>Zdroj tvrzení</li><li className={checkpoint.is_active ? "done" : ""}>Zařazeno do příští publikace</li></ul></aside></div>
       </section>
     );
   }
@@ -538,25 +721,25 @@ export function RouteCms({ auth, onMessage }: { auth: Pick<AuthController, "user
   const routeMedia = media.filter((item) => item.checkpoint_id === null && !item.archived_at);
   return (
     <section className="cms-workspace cms-editor">
-      <header className="cms-editor-heading"><button className="cms-back" onClick={() => { setScreen("list"); void loadRoutes(); }}>← Všechny trasy</button><div><span className={`cms-status cms-${route.lifecycle}`}>{lifecycleLabels[route.lifecycle]}</span><h2>{route.title || "Nová trasa"}</h2><p>{route.city_name} · {route.district || "bez městské části"}</p></div><button className="button primary" onClick={() => void saveRoute()} disabled={busy}>{busy ? "Ukládám…" : "Uložit koncept"}</button></header>
+      <header className="cms-editor-heading"><button className="cms-back" onClick={leaveRouteEditor}>← Všechny trasy</button><div><span className={`cms-status cms-${route.lifecycle}`}>{lifecycleLabels[route.lifecycle]}</span><h2>{route.title || "Nová trasa"}</h2><p>{route.city_name} · {route.district || "bez městské části"}</p></div><button className="button primary" onClick={() => void saveRoute()} disabled={busy}>{busy ? "Ukládám…" : "Uložit koncept"}</button></header>
       {message && <p className="cms-message" role="status">{message}</p>}
       <div className="cms-editor-grid"><div className="cms-form-stack">
         <details open className="cms-form-section"><summary>Základ trasy</summary><div className="cms-fields"><label>Slug / ID<input value={route.id} onChange={(event) => setRoute({ ...route, id: slugify(event.target.value) })} placeholder="brno-kralovo-pole-stopy" disabled={routes.some((item) => item.id === route.id)} /></label><label>Město<input value={route.city_name} onChange={(event) => setRoute({ ...route, city_name: event.target.value, city_id: slugify(event.target.value) })} /></label><label>Městská část / lokalita<input value={route.district} onChange={(event) => setRoute({ ...route, district: event.target.value })} /></label><label>Název<input value={route.title} onChange={(event) => setRoute({ ...route, title: event.target.value })} /></label><label className="cms-wide">Podtitulek<input value={route.tagline} onChange={(event) => setRoute({ ...route, tagline: event.target.value })} /></label><label className="cms-wide">Příběh a popis<textarea rows={6} value={route.description} onChange={(event) => setRoute({ ...route, description: event.target.value })} /></label></div></details>
         <details open className="cms-form-section"><summary>Parametry výpravy</summary><div className="cms-fields"><label>Délka (km)<input type="number" min="0" step="0.1" value={route.distance_km} onChange={(event) => setRoute({ ...route, distance_km: Number(event.target.value) })} /></label><label>Čas od (min)<input type="number" min="1" value={route.duration_min} onChange={(event) => setRoute({ ...route, duration_min: Number(event.target.value) })} /></label><label>Čas do (min)<input type="number" min="1" value={route.duration_max} onChange={(event) => setRoute({ ...route, duration_max: Number(event.target.value) })} /></label><label>Obtížnost<select value={route.difficulty} onChange={(event) => setRoute({ ...route, difficulty: event.target.value })}><option>Lehká</option><option>Střední</option><option>Těžká</option></select></label><label>Hráčů od<input type="number" min="1" value={route.team_min} onChange={(event) => setRoute({ ...route, team_min: Number(event.target.value) })} /></label><label>Hráčů do<input type="number" min="1" value={route.team_max} onChange={(event) => setRoute({ ...route, team_max: Number(event.target.value) })} /></label><label>Vybavení <small>oddělené čárkou</small><input value={route.equipment.join(", ")} onChange={(event) => setRoute({ ...route, equipment: csv(event.target.value) })} /></label><label>Publikum <small>oddělené čárkou</small><input value={route.audiences.join(", ")} onChange={(event) => setRoute({ ...route, audiences: csv(event.target.value) })} /></label></div></details>
-        <details open className="cms-form-section"><summary>Prodej a dostupnost</summary><div className="cms-fields"><label>Cena za tým (Kč)<input type="number" min="0" value={route.price_czk} onChange={(event) => setRoute({ ...route, price_czk: Number(event.target.value) })} disabled={!isSuperadmin} /></label><label>Dostupnost<select value={route.availability} onChange={(event) => setRoute({ ...route, availability: event.target.value as RouteAvailability })} disabled={!isSuperadmin}><option value="active">V prodeji</option><option value="coming">Připravujeme</option><option value="seasonal">Sezónní</option></select></label><label>Dostupné od<input type="date" value={dateValue(route.available_from)} onChange={(event) => setRoute({ ...route, available_from: event.target.value || null })} /></label><label>Dostupné do<input type="date" value={dateValue(route.available_to)} onChange={(event) => setRoute({ ...route, available_to: event.target.value || null })} /></label><label>Verze<input value={route.version} onChange={(event) => setRoute({ ...route, version: event.target.value })} /></label><label>Sezónnost<select value={route.seasonality} onChange={(event) => setRoute({ ...route, seasonality: event.target.value })}><option value="year-round">Celoročně</option><option value="seasonal">Sezónní</option></select></label></div>{!isSuperadmin && <p className="cms-help">Cenu a prodejní dostupnost může změnit pouze superadmin.</p>}</details>
+        <details open className="cms-form-section"><summary>Prodej a dostupnost</summary><div className="cms-fields"><label>Cena za tým (Kč)<input type="number" min="0" value={route.price_czk} onChange={(event) => setRoute({ ...route, price_czk: Number(event.target.value) })} disabled={!isSuperadmin} /></label><label>Dostupnost<select value={route.availability} onChange={(event) => { const availability = event.target.value as RouteAvailability; setRoute({ ...route, availability, seasonality: availability === "seasonal" ? "seasonal" : "year-round" }); }} disabled={!isSuperadmin}><option value="active">V prodeji</option><option value="coming">Připravujeme</option><option value="seasonal">Sezónní</option></select></label><label>Obchodní připravenost<select value={route.commercial_readiness ?? "blocked"} onChange={(event) => setRoute({ ...route, commercial_readiness: event.target.value as CommercialReadiness })} disabled={!isSuperadmin}><option value="blocked">Blokováno – koncept</option><option value="ready">Schváleno k prodeji</option></select></label><label>Dostupné od<input type="date" value={dateValue(route.available_from)} onChange={(event) => setRoute({ ...route, available_from: event.target.value || null })} disabled={!isSuperadmin} /></label><label>Dostupné do<input type="date" value={dateValue(route.available_to)} onChange={(event) => setRoute({ ...route, available_to: event.target.value || null })} disabled={!isSuperadmin} /></label><label>Verze<input value={route.version} onChange={(event) => setRoute({ ...route, version: event.target.value })} /></label><label>Režim trasy<input value={route.availability === "seasonal" ? "Sezónní" : "Celoroční"} readOnly /></label></div>{!isSuperadmin && <p className="cms-help">Cenu, prodejní dostupnost a finální schválení může změnit pouze superadmin.</p>}</details>
         <details open className="cms-form-section"><summary>Bezpečnost a terén</summary><div className="cms-fields"><label>Kočárek<select value={route.stroller_status} onChange={(event) => setRoute({ ...route, stroller_status: event.target.value as RouteStrollerStatus })}><option value="unknown">Nutno ověřit</option><option value="verified">Ano, terénně ověřeno</option><option value="not_recommended">Nedoporučeno</option></select></label><label>Předškolní děti<select value={route.preschool_status} onChange={(event) => setRoute({ ...route, preschool_status: event.target.value as RoutePreschoolStatus })}><option value="unknown">Nutno ověřit</option><option value="suitable">Vhodné</option><option value="with_adult">Vhodné s aktivním doprovodem</option><option value="not_recommended">Nedoporučeno</option></select></label><label>Poslední fyzická kontrola<input type="date" value={dateValue(route.last_field_check)} onChange={(event) => setRoute({ ...route, last_field_check: event.target.value || null })} /></label></div><RouteSuitabilityBadges strollerStatus={route.stroller_status} preschoolStatus={route.preschool_status} durationMaxMinutes={route.duration_max} /><label>Přístupnost<textarea rows={4} value={route.accessibility_note} onChange={(event) => setRoute({ ...route, accessibility_note: event.target.value })} /></label><label>Bezpečnostní poznámka<textarea rows={4} value={route.safety_note} onChange={(event) => setRoute({ ...route, safety_note: event.target.value })} /></label><label>Interní terénní poznámky<textarea rows={4} value={route.field_notes} onChange={(event) => setRoute({ ...route, field_notes: event.target.value })} /></label></details>
-        <section className="cms-form-section cms-checkpoint-list"><header><div><span className="section-label">Průběh výpravy</span><h3>Checkpointy</h3></div><button className="button secondary" onClick={beginCheckpoint} disabled={!route.id}>＋ Přidat checkpoint</button></header>{!route.id && <p className="cms-help">Nejdřív ulož novou trasu; potom můžeš přidat její checkpointy.</p>}{checkpoints.length === 0 ? <p>Trasa zatím nemá žádné checkpointy.</p> : checkpoints.map((item, index) => <article key={item.id}><span>{String(item.position).padStart(2, "0")}</span><div><b>{item.title}</b><small>{item.short_title} · {item.checkpoint_type}</small></div><div className="cms-order-actions"><button aria-label="Posunout nahoru" disabled={index === 0 || busy} onClick={() => void moveCheckpoint(item, -1)}>↑</button><button aria-label="Posunout dolů" disabled={index === checkpoints.length - 1 || busy} onClick={() => void moveCheckpoint(item, 1)}>↓</button></div><button onClick={() => openCheckpoint(item)}>Upravit</button><button className="cms-danger-link" disabled={route.lifecycle !== "draft"} onClick={() => void removeCheckpoint(item)}>Odstranit</button></article>)}</section>
-        <SourceEditor sources={routeSources} onChange={(next) => setSources((current) => current.map((item) => item.id === next.id ? next : item))} onAdd={() => void addSource(null)} onSave={(item) => void saveSource(item)} onRemove={(item) => void removeSource(item)} canRemove={route.lifecycle === "draft"} />
-        <MediaEditor items={routeMedia} form={mediaForm} onForm={setMediaForm} onUpload={(event) => void uploadMedia(event, null)} onArchive={(item) => void archiveMedia(item)} busy={busy} />
+        <section className="cms-form-section cms-checkpoint-list"><header><div><span className="section-label">Průběh výpravy</span><h3>Checkpointy</h3></div><button className="button secondary" onClick={beginCheckpoint} disabled={!routeIsSaved}>＋ Přidat checkpoint</button></header>{!routeIsSaved && <p className="cms-help">Nejdřív ulož novou trasu; potom můžeš přidat její checkpointy.</p>}{checkpoints.length === 0 ? <p>Trasa zatím nemá žádné checkpointy.</p> : checkpoints.map((item, index) => <article key={item.id}><span>{String(item.position).padStart(2, "0")}</span><div><b>{item.title}</b><small>{item.short_title} · {item.checkpoint_type} · {item.is_active ? "v příští publikaci" : "pracovní koncept"}</small></div><div className="cms-order-actions"><button aria-label="Posunout nahoru" disabled={index === 0 || busy} onClick={() => void moveCheckpoint(item, -1)}>↑</button><button aria-label="Posunout dolů" disabled={index === checkpoints.length - 1 || busy} onClick={() => void moveCheckpoint(item, 1)}>↓</button></div><button onClick={() => openCheckpoint(item)}>Upravit</button><button className="cms-danger-link" disabled={route.lifecycle !== "draft"} onClick={() => void removeCheckpoint(item)}>Odstranit</button></article>)}</section>
+        <SourceEditor sources={routeSources} onChange={changeSource} onAdd={() => void addSource(null)} onSave={(item) => void saveSource(item)} onRemove={(item) => void removeSource(item)} canAdd={routeIsSaved} canRemove />
+        <MediaEditor items={routeMedia} form={mediaForm} onForm={setMediaForm} onUpload={(event) => void uploadMedia(event, null)} onArchive={(item) => void archiveMedia(item)} busy={busy} canUpload={routeIsSaved} />
       </div><aside className="cms-side-panel"><span className="section-label">Kontrola a publikace</span><h3>{validation.length === 0 ? "Připraveno ke kontrole" : `${validation.length} bodů k doplnění`}</h3>{validation.length === 0 ? <p className="cms-valid">✓ Automatická kontrola je v pořádku. Před publikací ještě trasu projdi v terénu.</p> : <ul className="cms-validation-list">{validation.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul>}<div className="cms-publish-actions">{isSuperadmin ? <button className="button primary full" disabled={validation.length > 0 || busy} onClick={() => void publishRoute()}>Publikovat trasu</button> : <button className="button primary full" disabled={validation.length > 0 || busy} onClick={() => void saveRoute("review")}>Předat ke kontrole</button>}<small>Publikace vytvoří neměnný snapshot verze, takže rozehrané výpravy nezmění rozpracovaný koncept.</small></div></aside></div>
     </section>
   );
 }
 
-function SourceEditor({ sources, onChange, onAdd, onSave, onRemove, canRemove }: { sources: CmsSource[]; onChange: (source: CmsSource) => void; onAdd: () => void; onSave: (source: CmsSource) => void; onRemove: (source: CmsSource) => void; canRemove: boolean }) {
-  return <section className="cms-form-section cms-source-editor"><header><div><span className="section-label">Ověřitelnost</span><h3>Zdroje</h3></div><button className="button secondary" onClick={onAdd}>＋ Přidat zdroj</button></header>{sources.length === 0 ? <p>Žádný zdroj zatím není přiřazený.</p> : sources.map((source) => <article key={source.id}><label>Název<input value={source.title} onChange={(event) => onChange({ ...source, title: event.target.value })} /></label><label>URL<input type="url" value={source.url} onChange={(event) => onChange({ ...source, url: event.target.value })} /></label><label>Ověřeno<input type="date" value={dateValue(source.verified_at)} onChange={(event) => onChange({ ...source, verified_at: event.target.value || null })} /></label><label>Interní poznámka<input value={source.internal_note} onChange={(event) => onChange({ ...source, internal_note: event.target.value })} /></label><div><button onClick={() => onSave(source)}>Uložit zdroj</button><button className="cms-danger-link" disabled={!canRemove} onClick={() => onRemove(source)}>Odstranit</button></div></article>)}</section>;
+function SourceEditor({ sources, onChange, onAdd, onSave, onRemove, canAdd, canRemove }: { sources: CmsSource[]; onChange: (source: CmsSource) => void; onAdd: () => void; onSave: (source: CmsSource) => void; onRemove: (source: CmsSource) => void; canAdd: boolean; canRemove: boolean }) {
+  return <section className="cms-form-section cms-source-editor"><header><div><span className="section-label">Ověřitelnost</span><h3>Zdroje</h3></div><button className="button secondary" onClick={onAdd} disabled={!canAdd}>＋ Přidat zdroj</button></header>{!canAdd && <p className="cms-help">Nejdřív ulož trasu nebo checkpoint; zdroj potřebuje existující záznam.</p>}{sources.length === 0 ? <p>Žádný zdroj zatím není přiřazený.</p> : sources.map((source) => <article key={source.id}><label>Název<input value={source.title} onChange={(event) => onChange({ ...source, title: event.target.value })} /></label><label>URL<input type="url" value={source.url} onChange={(event) => onChange({ ...source, url: event.target.value })} /></label><label>Ověřeno<input type="date" value={dateValue(source.verified_at)} onChange={(event) => onChange({ ...source, verified_at: event.target.value || null })} /></label><label>Interní poznámka<input value={source.internal_note} onChange={(event) => onChange({ ...source, internal_note: event.target.value })} /></label><div><button onClick={() => onSave(source)}>Uložit zdroj</button><button className="cms-danger-link" disabled={!canRemove} onClick={() => onRemove(source)}>Odstranit</button></div></article>)}</section>;
 }
 
-function MediaEditor({ items, form, onForm, onUpload, onArchive, busy }: { items: CmsMedia[]; form: MediaForm; onForm: (form: MediaForm) => void; onUpload: (event: ChangeEvent<HTMLInputElement>) => void; onArchive: (item: CmsMedia) => void; busy: boolean }) {
-  return <section className="cms-form-section cms-media-editor"><header><div><span className="section-label">Fotografie</span><h3>Média</h3></div></header><div className="cms-media-upload"><label>Účel<select value={form.role} onChange={(event) => onForm({ ...form, role: event.target.value as MediaRole })}><option value="cover">Titulní</option><option value="public">Veřejná ve hře</option><option value="field">Interní terénní</option></select></label><label>Alternativní text<input value={form.alt} onChange={(event) => onForm({ ...form, alt: event.target.value })} required={form.role !== "field"} /></label><label>Autor / zdroj<input value={form.author} onChange={(event) => onForm({ ...form, author: event.target.value })} /></label><label>Licence<input value={form.license} onChange={(event) => onForm({ ...form, license: event.target.value })} /></label><label className="button secondary cms-file-button">{busy ? "Nahrávám…" : "Vybrat a nahrát obrázek"}<input type="file" accept="image/*" onChange={onUpload} disabled={busy} /></label><small>JPEG, PNG nebo WebP · nejvýše 8 MB. Interní fotografie se hráčům nezobrazí.</small></div>{items.length > 0 && <div className="cms-media-grid">{items.map((item) => <article key={item.id}><img src={item.public_url} alt={item.alt_text || "Interní terénní fotografie"} /><div><span>{item.media_role === "cover" ? "Titulní" : item.media_role === "field" ? "Interní" : "Veřejná"}</span><b>{item.alt_text || "Bez veřejného popisu"}</b><small>{[item.author_credit, item.license].filter(Boolean).join(" · ") || "Autor a licence neuvedeny"}</small><button onClick={() => onArchive(item)}>Archivovat</button></div></article>)}</div>}</section>;
+function MediaEditor({ items, form, onForm, onUpload, onArchive, busy, canUpload }: { items: CmsMedia[]; form: MediaForm; onForm: (form: MediaForm) => void; onUpload: (event: ChangeEvent<HTMLInputElement>) => void; onArchive: (item: CmsMedia) => void; busy: boolean; canUpload: boolean }) {
+  return <section className="cms-form-section cms-media-editor"><header><div><span className="section-label">Fotografie</span><h3>Média</h3></div></header><div className="cms-media-upload"><label>Účel<select value={form.role} onChange={(event) => onForm({ ...form, role: event.target.value as MediaRole })}><option value="cover">Titulní</option><option value="public">Veřejná ve hře</option><option value="field">Interní terénní</option></select></label><label>Alternativní text<input value={form.alt} onChange={(event) => onForm({ ...form, alt: event.target.value })} required={form.role !== "field"} /></label><label>Autor / zdroj<input value={form.author} onChange={(event) => onForm({ ...form, author: event.target.value })} /></label><label>Licence<input value={form.license} onChange={(event) => onForm({ ...form, license: event.target.value })} /></label><label className="button secondary cms-file-button">{busy ? "Nahrávám…" : "Vybrat a nahrát obrázek"}<input type="file" accept="image/*" onChange={onUpload} disabled={busy || !canUpload} /></label><small>{canUpload ? "JPEG, PNG nebo WebP · nejvýše 8 MB. Interní fotografie se hráčům nezobrazí." : "Nejdřív ulož trasu nebo checkpoint; média potřebují existující záznam."}</small></div>{items.length > 0 && <div className="cms-media-grid">{items.map((item) => <article key={item.id}><img src={item.public_url} alt={item.alt_text || "Interní terénní fotografie"} /><div><span>{item.media_role === "cover" ? "Titulní" : item.media_role === "field" ? "Interní" : "Veřejná"}</span><b>{item.alt_text || "Bez veřejného popisu"}</b><small>{[item.author_credit, item.license].filter(Boolean).join(" · ") || "Autor a licence neuvedeny"}</small><button onClick={() => onArchive(item)}>Archivovat</button></div></article>)}</div>}</section>;
 }

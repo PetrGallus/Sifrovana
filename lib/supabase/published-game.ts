@@ -37,7 +37,7 @@ export type PublishedGameHint = {
 
 /**
  * The playable checkpoint contract deliberately has no accepted-answer fields.
- * `fact` and `nextClue` are null until this checkpoint has been solved.
+ * `fact`, `nextClue` and `metaToken` are null until this checkpoint has been solved.
  */
 export type PublishedGameCheckpoint = {
   id: string;
@@ -53,6 +53,8 @@ export type PublishedGameCheckpoint = {
   fallbackPrompt: string;
   fact: string | null;
   nextClue: string | null;
+  /** Optional fragment earned for a later meta-puzzle. Never exposed before solving. */
+  metaToken: string | null;
   map: { x: number; y: number };
   revealedHints: PublishedGameHint[];
 };
@@ -85,6 +87,7 @@ export type PublishedGameAnswerResult =
       completed: boolean;
       fact: string;
       nextClue: string;
+      metaToken: string | null;
       session: PublishedGameSession;
     };
 
@@ -222,6 +225,7 @@ function mapCheckpoint(value: unknown): PublishedGameCheckpoint {
     fallbackPrompt: asString(checkpoint.fallback_prompt, "checkpoint.fallback_prompt"),
     fact: asNullableString(checkpoint.fact, "checkpoint.fact"),
     nextClue: asNullableString(checkpoint.next_clue, "checkpoint.next_clue"),
+    metaToken: asNullableString(checkpoint.meta_token, "checkpoint.meta_token"),
     map: {
       x: asNumber(checkpoint.map_x, "checkpoint.map_x"),
       y: asNumber(checkpoint.map_y, "checkpoint.map_y"),
@@ -266,6 +270,19 @@ function mapSession(value: unknown): PublishedGameSession {
     throw new PublishedGameError(
       "Server vrátil checkpoint, který ještě nemá být odemčený.",
       "FUTURE_CHECKPOINT_EXPOSED",
+    );
+  }
+
+  if (
+    result.checkpoints.some(
+      (checkpoint) =>
+        checkpoint.position === result.progress.currentPosition &&
+        (checkpoint.fact !== null || checkpoint.nextClue !== null || checkpoint.metaToken !== null),
+    )
+  ) {
+    throw new PublishedGameError(
+      "Server odkryl odměnu checkpointu před jeho vyřešením.",
+      "CHECKPOINT_REWARD_EXPOSED",
     );
   }
 
@@ -330,6 +347,7 @@ export async function submitPublishedGameAnswer(
     completed: raw.completed,
     fact: asString(raw.fact, "answer.fact"),
     nextClue: asString(raw.next_clue, "answer.next_clue"),
+    metaToken: asNullableString(raw.meta_token, "answer.meta_token"),
     session: mapSession(raw.session),
   };
 }

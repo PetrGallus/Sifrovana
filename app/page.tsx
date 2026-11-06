@@ -41,6 +41,7 @@ type PublishedResult = {
   checkpoint: PublishedGameCheckpoint;
   fact: string;
   nextClue: string;
+  metaToken: string | null;
   completed: boolean;
 };
 
@@ -58,6 +59,7 @@ type GameCheckpoint = {
   fallback: { prompt: string };
   fact: string;
   nextClue: string;
+  metaToken: string | null;
   map: { x: number; y: number };
 };
 
@@ -124,6 +126,7 @@ function publishedCheckpointToView(checkpoint: PublishedGameCheckpoint, result: 
     fallback: { prompt: checkpoint.fallbackPrompt },
     fact: result?.fact ?? checkpoint.fact ?? "",
     nextClue: result?.nextClue ?? checkpoint.nextClue ?? "",
+    metaToken: result?.metaToken ?? checkpoint.metaToken,
     map: checkpoint.map,
   };
 }
@@ -304,6 +307,10 @@ export default function Home() {
     ?? catalogRoutes.find((route) => route.id === demoRoute.id)?.checkpoints
     ?? routePreviewStops.length;
   const solvedCount = publishedGame.session?.progress.solvedCheckpointIds.length ?? state.progress.solved.length;
+  const earnedMetaTokens = (publishedGame.session?.checkpoints ?? [])
+    .filter((checkpoint) => checkpoint.metaToken)
+    .map((checkpoint) => ({ position: checkpoint.position, token: checkpoint.metaToken as string }))
+    .sort((left, right) => left.position - right.position);
   const completed = Boolean(publishedGame.session?.progress.completedAt)
     || state.progress.completed
     || state.activityAdded;
@@ -409,7 +416,7 @@ export default function Home() {
         setAnswerStatus("wrong");
         return;
       }
-      setPublishedResult({ checkpoint, fact: result.fact, nextClue: result.nextClue, completed: result.completed });
+      setPublishedResult({ checkpoint, fact: result.fact, nextClue: result.nextClue, metaToken: result.metaToken, completed: result.completed });
       setAnswerStatus("correct");
       setState((current) => ({
         ...current,
@@ -541,6 +548,7 @@ export default function Home() {
             checkpoint={activeCheckpoint}
             totalCheckpoints={totalCheckpoints}
             solvedCount={solvedCount}
+            earnedMetaTokens={earnedMetaTokens}
             message={gameMessage}
             busy={publishedGame.busy}
             arrived={arrived}
@@ -776,8 +784,8 @@ function Library({ owned, progress, totalCheckpoints, notice, onDiscover, onStar
   );
 }
 
-function Game({ checkpoint, totalCheckpoints, solvedCount, message, busy, arrived, setArrived, answer, setAnswer, answerStatus, setAnswerStatus, shownHints, fallbackMode, onHint, onToggleFallback, onCheck, onNext, onExit }: {
-  checkpoint: GameCheckpoint; totalCheckpoints: number; solvedCount: number; message: string; busy: boolean; arrived: boolean; setArrived: (value: boolean) => void; answer: string; setAnswer: (value: string) => void; answerStatus: "idle" | "wrong" | "correct"; setAnswerStatus: (value: "idle" | "wrong" | "correct") => void; shownHints: number; fallbackMode: boolean; onHint: () => void | Promise<void>; onToggleFallback: () => void; onCheck: () => void | Promise<void>; onNext: () => void; onExit: () => void;
+function Game({ checkpoint, totalCheckpoints, solvedCount, earnedMetaTokens, message, busy, arrived, setArrived, answer, setAnswer, answerStatus, setAnswerStatus, shownHints, fallbackMode, onHint, onToggleFallback, onCheck, onNext, onExit }: {
+  checkpoint: GameCheckpoint; totalCheckpoints: number; solvedCount: number; earnedMetaTokens: { position: number; token: string }[]; message: string; busy: boolean; arrived: boolean; setArrived: (value: boolean) => void; answer: string; setAnswer: (value: string) => void; answerStatus: "idle" | "wrong" | "correct"; setAnswerStatus: (value: "idle" | "wrong" | "correct") => void; shownHints: number; fallbackMode: boolean; onHint: () => void | Promise<void>; onToggleFallback: () => void; onCheck: () => void | Promise<void>; onNext: () => void; onExit: () => void;
 }) {
   return (
     <section className="game-page">
@@ -790,6 +798,7 @@ function Game({ checkpoint, totalCheckpoints, solvedCount, message, busy, arrive
         <div className="puzzle-panel">
           {message && <p className="form-message error" role="alert">{message}</p>}
           <div className="checkpoint-title"><span className="checkpoint-badge">STOPA {String(checkpoint.order).padStart(2, "0")}</span><small>{checkpoint.type === "online" ? "ONLINE ŠIFRA" : checkpoint.type === "physical" ? "FYZICKÁ STOPA" : "HYBRIDNÍ STOPA"}</small><h1>{checkpoint.title}</h1><p>{checkpoint.short} · {checkpoint.coordinates.lat.toFixed(4)}, {checkpoint.coordinates.lng.toFixed(4)}</p></div>
+          {earnedMetaTokens.length > 0 && <div className="story-card"><span>ZÍSKANÉ FRAGMENTY DO METAŠIFRY</span><p>{earnedMetaTokens.map((item) => `${item.position}. ${item.token}`).join(" · ")}</p></div>}
           {!arrived ? (
             <div className="arrival-card"><div className="radar"><i /><span>⌖</span></div><h2>Jsi na místě?</h2><p>V ostré hře checkpoint ověří GPS. V pilotu můžeš pokračovat odkudkoli.</p><button className="button primary full" onClick={() => setArrived(true)}>Jsem na místě – demo →</button><small>Simulace polohy · žádná data se neodesílají</small></div>
           ) : (
@@ -802,7 +811,7 @@ function Game({ checkpoint, totalCheckpoints, solvedCount, message, busy, arrive
                 {!fallbackMode && shownHints > 0 && <div className="hint"><b>Nápověda {shownHints}</b><p>{checkpoint.puzzle.hints[shownHints - 1]}</p></div>}
                 {!fallbackMode && answerStatus !== "correct" && <button className="hint-button" onClick={() => void onHint()} disabled={shownHints >= 2 || busy}>◎ {shownHints >= 2 ? "Všechny nápovědy použity" : `Chci nápovědu ${shownHints + 1}`}</button>}
               </div>
-              {answerStatus === "correct" && <div className="success-card"><span className="success-mark">✓</span><div><small>STOPA ROZLUŠTĚNA</small><h2>{checkpoint.order === totalCheckpoints ? "Kronika je kompletní!" : "Máš další list kroniky"}</h2><p>{checkpoint.fact}</p><div className="next-clue"><small>{checkpoint.order === totalCheckpoints ? "ZÁVĚR" : "DALŠÍ STOPA"}</small><b>{checkpoint.nextClue}</b></div><button className="button primary full" onClick={onNext}>{checkpoint.order === totalCheckpoints ? "Dokončit výpravu →" : "Odhalit další checkpoint →"}</button></div></div>}
+              {answerStatus === "correct" && <div className="success-card"><span className="success-mark">✓</span><div><small>STOPA ROZLUŠTĚNA</small><h2>{checkpoint.order === totalCheckpoints ? "Kronika je kompletní!" : "Máš další list kroniky"}</h2><p>{checkpoint.fact}</p>{checkpoint.metaToken && <div className="next-clue"><small>FRAGMENT DO METAŠIFRY</small><b>{checkpoint.metaToken}</b></div>}<div className="next-clue"><small>{checkpoint.order === totalCheckpoints ? "ZÁVĚR" : "DALŠÍ STOPA"}</small><b>{checkpoint.nextClue}</b></div><button className="button primary full" onClick={onNext}>{checkpoint.order === totalCheckpoints ? "Dokončit výpravu →" : "Odhalit další checkpoint →"}</button></div></div>}
             </>
           )}
         </div>

@@ -1,6 +1,6 @@
 # Šifrovaná — severní Brno a vánoční portfolio
 
-> Stav k 5. listopadu 2026: redakční koncepty. Nejsou určeny k prodeji ani k označení jako terénně ověřené.
+> Stav k 6. listopadu 2026: redakční koncepty. Nejsou určeny k prodeji ani k označení jako terénně ověřené.
 
 Tento dokument připravuje devět celoročních tras pro Medlánky, Černá Pole a
 Řečkovice s Mokrou Horou a tři možné vánoční speciály mimo nejvytíženější
@@ -150,6 +150,12 @@ styly a chronologie využijí převýšení jako herní motiv, nikoliv jako rizi
 **Terénní brána:** ověřit počet schodů, osvětlení a povrch. Trasu automaticky
 pozastavit při námraze a neumožnit start po setmění.
 
+**Produktové riziko:** tento pracovní sled se v šesti až sedmi bodech překrývá
+s trasou „Tři zahrady, tři rodiny“. Dokud nenajdeme alespoň čtyři kvalitní
+unikátní zastávky, nesmí se prodávat jako samostatná plně naceněná trasa.
+Vhodnější může být náročnější varianta, upgrade nebo bonus pro majitele základní
+trasy.
+
 ## Řečkovice a Mokrá Hora
 
 ### Pečeť svatého Vavřince
@@ -225,6 +231,12 @@ náměstí SNP.
 Každý rok je nutné potvrdit, že betlém i strom skutečně stojí a do kdy. Zahrady
 vil a proměnlivá výzdoba jsou pouze bonusové vrstvy.
 
+První polovina se záměrně opírá o stejnou oblast jako vilová trasa. Před
+zpoplatněním je proto potřeba rozhodnout, zda půjde o levnější sezonní upgrade,
+kredit pro stávající zákazníky, nebo trasu s výrazně odlišnými úlohami a
+atmosférou. Samostatná plná cena bez přidané hodnoty by působila jako opakovaný
+obsah.
+
 ### Kosmické Vánoce
 
 **Lokalita:** Kraví hora · 2 km · 45–60 min · 7 bodů.
@@ -277,3 +289,26 @@ přesnou mapu, respektování welfare a každoroční kontrolu programu i uzaví
 - pět nezasvěcených testerů na každou sadu šifer;
 - u sezonních tras potvrzení instalace, přesného období a zimní bezpečnosti;
 - u Zoo Brno písemná partnerská dohoda.
+
+## Pracovní postup v CMS
+
+Nově založené checkpointy se importují jako **neaktivní redakční drafty**.
+Jejich souřadnice, texty a šifry slouží jako podklad pro terénní průchod, nikoliv
+jako hotový herní obsah.
+
+1. Redaktor otevře každý bod přes odkazy do Mapy.com a Google Maps a ověří, že
+   se nachází na veřejně přístupném a bezpečném místě.
+2. V terénu pořídí kontrolní fotografii, změří úsek od předchozího bodu a zapíše
+   datum, počasí a případnou sezónní překážku.
+3. Teprve podle skutečně viditelné indicie doplní přijímané odpovědi a otestuje
+   normalizaci diakritiky, mezer a velikosti písmen.
+4. Ověří druhou, plně online variantu úkolu pro případ uzavírky, opravy,
+   poškozeného nápisu nebo nepřístupné zahrady.
+5. Bod označí „Zařadit do publikované hry“ až po fyzické kontrole. Trasa musí
+   mít navíc vyplněné datum posledního kompletního průchodu.
+6. Před publikací projdou celou trasu nejméně tři skupiny a šifry pět lidí,
+   kteří neznali řešení předem.
+
+Tento postup odděluje autorskou přípravu od produkční hry: rozpracovaný bod je
+v CMS viditelný a upravitelný, ale nemůže se omylem dostat do publikovaného
+snapshotu.
